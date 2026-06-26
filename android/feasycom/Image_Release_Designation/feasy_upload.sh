@@ -807,8 +807,14 @@ package_image() {
 
     if [[ "$FTP_USE_LFTP" == true ]]; then
         # lftp 模式：尝试下载远程全局 CHANGELOG.md
-        remote_changelog_tmp=$(mktemp)
-        if lftp_exec "get ${global_changelog_path} -o ${remote_changelog_tmp}" 2>/dev/null; then
+        # 拆分为目录+文件名，cd 到目录再 get（避免中文路径 CWD 问题）
+        # 使用 TEMP_DIR 下的固定路径名（TEMP_DIR 是全新空目录，不会冲突）
+        local changelog_dir
+        changelog_dir=$(dirname "$global_changelog_path")
+        local changelog_file
+        changelog_file=$(basename "$global_changelog_path")
+        remote_changelog_tmp="${TEMP_DIR}/remote_changelog.md"
+        if lftp_exec "cd ${changelog_dir} && get ${changelog_file} -o ${remote_changelog_tmp}"; then
             log_info "发现远程已有全局 CHANGELOG.md，追加当前发行说明..."
             {
                 echo "$current_entry"
