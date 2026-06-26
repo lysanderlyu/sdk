@@ -1,0 +1,286 @@
+#!/bin/bash
+set -uo pipefail
+
+# ===================== Core Configuration (Exact match with your paths) =====================
+RK_BASE_DIR="device/rockchip/rk356x"
+UBOOT_DTS_BASE="u-boot/arch/arm/dts"
+UBOOT_DEFCONFIG_BASE="u-boot/configs"
+KERNEL_DTS_BASE="kernel/arch/arm64/boot/dts/rockchip"
+KERNEL_CONFIG_BASE="kernel/arch/arm64/configs"
+
+# ===================== Usage Instructions =====================
+usage() {
+    echo "Usage: $0 <command> <source_project> <target_project>"
+    echo "Commands:"
+    echo "  clone   - Clone <source_project> as <target_project> (requires 3 params)"
+    echo "  delete  - Delete <project> (requires 2 params)"
+    echo "Examples:"
+    echo "  $0 clone ok3568_r bw2231    # Clone ok3568_r as bw2231"
+    echo "  $0 delete bw2231            # Remove bw2231 project"
+    exit 1
+}
+
+# ===================== Safe Path Check (Warning only, no exit) =====================
+safe_path_check() {
+    local path="$1"
+    local type="$2"
+    if [[ "$type" == "dir" && ! -d "$path" ]]; then
+        echo "WARNING: Directory not exist → $path"
+        return 1
+    elif [[ "$type" == "file" && ! -f "$path" ]]; then
+        echo "WARNING: File not exist → $path"
+        return 1
+    fi
+    return 0
+}
+
+# ===================== Global AndroidProducts.mk Management =====================
+GLOBAL_ANDPROD_MK="${RK_BASE_DIR}/AndroidProducts.mk"
+
+# Add project entries to global AndroidProducts.mk (used in clone)
+add_to_global_android_products() {
+    local target_proj="$1"
+    local temp_file="${GLOBAL_ANDPROD_MK}.tmp"
+    local product_processed=0
+    local lunch_processed=0
+
+    if [ ! -f "$GLOBAL_ANDPROD_MK" ]; then
+        echo "ERROR: Global AndroidProducts.mk not found → $GLOBAL_ANDPROD_MK"
+        return 1
+    fi
+
+    > "$temp_file"
+    while IFS= read -r line; do
+        echo "$line" >> "$temp_file"
+
+        if [ $product_processed -eq 0 ]; then
+            if echo "$line" | grep -qF 'PRODUCT_MAKEFILES := \'; then
+                echo "    \$(LOCAL_DIR)/${target_proj}/${target_proj}.mk \\" >> "$temp_file"
+                product_processed=1
+            fi
+        fi
+
+        if [ $lunch_processed -eq 0 ]; then
+            if echo "$line" | grep -qF 'COMMON_LUNCH_CHOICES := \'; then
+                echo "    ${target_proj}-userdebug \\" >> "$temp_file"
+                lunch_processed=1
+            fi
+        fi
+    done < "$GLOBAL_ANDPROD_MK"
+
+    mv "$temp_file" "$GLOBAL_ANDPROD_MK"
+    rm -f "$temp_file" 2>/dev/null
+
+    # Verification
+    local makefile_entry='$(LOCAL_DIR)/'"$target_proj"'/'"$target_proj"'.mk'
+    local lunch_entry="$target_proj-userdebug"
+    if grep -qF "$makefile_entry" "$GLOBAL_ANDPROD_MK" && grep -qF "$lunch_entry" "$GLOBAL_ANDPROD_MK"; then
+        echo "INFO: Global AndroidProducts.mk updated with ${target_proj} entries"
+    else
+        echo "WARNING: Verification of global AndroidProducts.mk may have failed"
+        grep -n "$target_proj" "$GLOBAL_ANDPROD_MK" 2>/dev/null || true
+    fi
+}
+
+# Remove project entries from global AndroidProducts.mk (used in delete)
+remove_from_global_android_products() {
+    local target_proj="$1"
+    local temp_file="${GLOBAL_ANDPROD_MK}.tmp"
+    local makefile_entry='$(LOCAL_DIR)/'"$target_proj"'/'"$target_proj"'.mk'
+    local lunch_entry="$target_proj-userdebug"
+
+    if [ ! -f "$GLOBAL_ANDPROD_MK" ]; then
+        echo "ERROR: Global AndroidProducts.mk not found → $GLOBAL_ANDPROD_MK"
+        return 1
+    fi
+
+    cp "$GLOBAL_ANDPROD_MK" "${GLOBAL_ANDPROD_MK}.bak"
+    > "$temp_file"
+    while IFS= read -r line; do
+        if echo "$line" | grep -qF "$makefile_entry" || echo "$line" | grep -qF "$lunch_entry"; then
+            continue
+        fi
+        echo "$line" >> "$temp_file"
+    done < "$GLOBAL_ANDPROD_MK"
+
+    mv "$temp_file" "$GLOBAL_ANDPROD_MK"
+    rm -f "$temp_file" 2>/dev/null
+
+    # Verification
+    if ! grep -qF "$makefile_entry" "$GLOBAL_ANDPROD_MK" && ! grep -qF "$lunch_entry" "$GLOBAL_ANDPROD_MK"; then
+        echo "INFO: ${target_proj} entries removed from global AndroidProducts.mk"
+    else
+        echo "WARNING: Some ${target_proj} entries may remain in global AndroidProducts.mk"
+        grep -n "$target_proj" "$GLOBAL_ANDPROD_MK" 2>/dev/null || true
+    fi
+}
+
+# ===================== Clone Project (Copy files + Add entries) =====================
+clone_project() {
+    local target_proj="$1"
+    local source_proj="$2"
+    local target_upper=$(echo "$target_proj" | tr '[:lower:]' '[:upper:]')
+
+    # Source/target paths
+    local source_dir="${RK_BASE_DIR}/${source_proj}"
+    local target_dir="${RK_BASE_DIR}/${target_proj}"
+    local source_board_config="${source_dir}/BoardConfig.mk"
+
+    # 0. Create project-specific AndroidProducts.mk (userdebug only)
+    echo "[0/12] Creating project-specific AndroidProducts.mk"
+    mkdir -p "${RK_BASE_DIR}/${target_proj}" 2>/dev/null
+    cat > "${RK_BASE_DIR}/${target_proj}/AndroidProducts.mk" << EOF
+# Auto-generated by project.sh
+PRODUCT_MAKEFILES := \\
+    \$(LOCAL_DIR)/${target_proj}.mk
+
+COMMON_LUNCH_CHOICES := \\
+    ${target_proj}-userdebug
+EOF
+
+    # 1. Validate source project
+    echo "[1/12] Validating source project files"
+    if ! safe_path_check "$source_dir" "dir"; then
+        echo "ERROR: Source directory missing → $source_dir"
+        return 1
+    fi
+
+    # 2. Check if target project already exists
+    if [[ -d "$target_dir" ]]; then
+        echo ""
+        echo "WARNING: 目标项目目录已存在: ${target_dir}"
+        echo -n "是否覆盖? [y/N] "
+        read -r confirm
+        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+            echo "INFO: 操作已取消"
+            return 1
+        fi
+    fi
+    echo "[2/12] Target project check passed"
+
+    # 3. Copy source project to target directory
+    echo "[3/12] Copying source directory to target"
+    rm -rf "$target_dir" 2>/dev/null
+    cp -r "$source_dir" "$target_dir" 2>/dev/null || echo "WARNING: Failed to copy source directory"
+
+    # 4. Extract source board identifier (e.g., OK3568-C)
+    echo "[4/12] Extracting source board identifier"
+    local source_upper=$(grep -E "^PRODUCT_UBOOT_CONFIG :=" "$source_board_config" | awk -F':=' '{print $2}' | tr -d ' ')
+    [[ -z "$source_upper" ]] && source_upper="${target_upper}"
+    echo "INFO: Source identifier → $source_upper"
+
+    # 5-7. Replace/rename mk files
+    echo "[5/12] Replacing project name in .mk files"
+    sed -i "s/${source_proj}/${target_proj}/g" "${target_dir}/${source_proj}.mk" 2>/dev/null
+    echo "[6/12] Renaming .mk file"
+    mv "${target_dir}/${source_proj}.mk" "${target_dir}/${target_proj}.mk" 2>/dev/null || echo "WARNING: Failed to rename .mk file"
+    echo "[7/12] Updating BoardConfig.mk"
+    sed -i "s/${source_upper}/${target_upper}/g" "${target_dir}/BoardConfig.mk" 2>/dev/null
+
+    # 8-10. Copy u-boot/kernel config files
+    echo "[8/12] Copying u-boot DTS file"
+    cp "${UBOOT_DTS_BASE}/${source_upper}.dts" "${UBOOT_DTS_BASE}/${target_upper}.dts" 2>/dev/null || echo "WARNING: Failed to copy u-boot DTS"
+    echo "[9/12] Copying u-boot defconfig file"
+    cp "${UBOOT_DEFCONFIG_BASE}/${source_upper}_defconfig" "${UBOOT_DEFCONFIG_BASE}/${target_upper}_defconfig" 2>/dev/null || echo "WARNING: Failed to copy u-boot defconfig"
+    echo "[10/12] Copying kernel files"
+    cp "${KERNEL_DTS_BASE}/${source_upper}-android.dts" "${KERNEL_DTS_BASE}/${target_upper}-android.dts" 2>/dev/null || echo "WARNING: Failed to copy kernel DTS"
+    cp "${KERNEL_CONFIG_BASE}/${source_upper}-android_defconfig" "${KERNEL_CONFIG_BASE}/${target_upper}-android_defconfig" 2>/dev/null || echo "WARNING: Failed to copy kernel defconfig"
+
+    # 11. Append custom metadata fields to target .mk file (if not already present)
+    if grep -q "PRODUCT_CUSTOM_CHIP" "${target_dir}/${target_proj}.mk" 2>/dev/null; then
+        echo "[11/12] BSP metadata already present, skipping"
+    else
+        echo "[11/12] Appending BSP metadata to ${target_proj}.mk"
+        {
+            echo ""
+            echo "# ================= Feasycom 模组 BSP 发布配置 ================="
+            echo "# 用户可在此处自定义项目相关的元数据字段，按需修改或增删，这些会影响生成镜像的名字，便于后续自动化编译和上传固件"
+            echo "PRODUCT_CUSTOM_CHIP := RK3568"
+            echo "PRODUCT_SYSTEM_PLATFORM := A11"
+            echo "PRODUCT_CHIPSET_NAME := ATBM6165"
+            echo "PRODUCT_CUSTOM_VERSION := V1.0.0"
+            echo "# ============================================================"
+        } >> "${target_dir}/${target_proj}.mk" 2>/dev/null || echo "WARNING: Failed to append metadata to .mk file"
+    fi
+
+    # 12. Add entries to global AndroidProducts.mk
+    echo "[12/12] Adding entries to global AndroidProducts.mk"
+    add_to_global_android_products "$target_proj"
+
+    echo -e "\nSUCCESS: Project ${target_proj} cloned successfully!"
+}
+
+# ===================== Delete Project (Delete files + Remove entries) =====================
+delete_project() {
+    local target_proj="$1"
+    local target_upper=$(echo "$target_proj" | tr '[:lower:]' '[:upper:]')
+
+    # Target paths
+    local target_dir="${RK_BASE_DIR}/${target_proj}"
+    local target_uboot_dts="${UBOOT_DTS_BASE}/${target_upper}.dts"
+    local target_uboot_defconfig="${UBOOT_DEFCONFIG_BASE}/${target_upper}_defconfig"
+    local target_kernel_dts="${KERNEL_DTS_BASE}/${target_upper}-android.dts"
+    local target_kernel_defconfig="${KERNEL_CONFIG_BASE}/${target_upper}-android_defconfig"
+
+    # 0. Remove entries from global AndroidProducts.mk
+    remove_from_global_android_products "$target_proj"
+
+    # 1. Delete project directory
+    echo "[2/5] Deleting project directory"
+    if safe_path_check "$target_dir" "dir"; then
+        rm -rf "$target_dir" 2>/dev/null || echo "WARNING: Failed to delete project directory"
+    fi
+
+    # 2. Delete u-boot DTS
+    echo "[3/5] Deleting u-boot DTS file"
+    if safe_path_check "$target_uboot_dts" "file"; then
+        rm -f "$target_uboot_dts" 2>/dev/null || echo "WARNING: Failed to delete u-boot DTS"
+    fi
+
+    # 3. Delete u-boot defconfig
+    echo "[4/5] Deleting u-boot defconfig file"
+    if safe_path_check "$target_uboot_defconfig" "file"; then
+        rm -f "$target_uboot_defconfig" 2>/dev/null || echo "WARNING: Failed to delete u-boot defconfig"
+    fi
+
+    # 4. Delete kernel DTS
+    echo "[5/5] Deleting kernel files"
+    if safe_path_check "$target_kernel_dts" "file"; then
+        rm -f "$target_kernel_dts" 2>/dev/null || echo "WARNING: Failed to delete kernel DTS"
+    fi
+
+    # 5. Delete kernel defconfig
+    if safe_path_check "$target_kernel_defconfig" "file"; then
+        rm -f "$target_kernel_defconfig" 2>/dev/null || echo "WARNING: Failed to delete kernel defconfig"
+    fi
+
+    echo -e "\nSUCCESS: Project ${target_proj} deleted successfully!"
+}
+
+# ===================== Main Logic =====================
+main() {
+    if [[ $# -lt 2 || $# -gt 3 ]]; then
+        echo "ERROR: Invalid parameter count!"
+        usage
+    fi
+
+    local cmd="$1"
+    local source_proj="$2"
+    local target_proj=""
+
+    if [[ "$cmd" == "clone" ]]; then
+        if [[ -z "$3" ]]; then
+            echo "ERROR: Clone requires target project name (3rd parameter)!"
+            usage
+        fi
+        target_proj="$3"
+        clone_project "$target_proj" "$source_proj"
+    elif [[ "$cmd" == "delete" ]]; then
+        delete_project "$source_proj"
+    else
+        echo "ERROR: Invalid command! Only 'clone' or 'delete' allowed"
+        usage
+    fi
+}
+
+main "$@"
