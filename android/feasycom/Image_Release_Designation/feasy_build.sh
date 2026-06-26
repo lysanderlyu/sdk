@@ -227,30 +227,45 @@ check_git_status() {
     log_info "Git 仓库状态检查通过"
 }
 
+# ===================== MK 配置读取辅助函数 =====================
+# 从设备配置文件中提取指定 key 的值，未找到时警告并提示用户修改位置
+read_mk_meta() {
+    local key="$1"
+    local mk_path="$2"
+    local value
+    value=$(grep -E "^${key}\s*:=" "$mk_path" 2>/dev/null | awk '{print $3}')
+    if [[ -z "$value" ]]; then
+        log_error "${key} 未在 ${mk_path} 中定义！"
+        log_error "请在该文件中添加: ${key} := <值>"
+        log_error "可使用 feasy_template.sh clone 自动生成模板，或参考已有项目的 .mk 文件手动配置"
+        exit 1
+    fi
+    echo "$value"
+}
+
 # ===================== 获取版本信息 =====================
 get_version_info() {
     log_step "获取版本信息"
-    
+
     cd "$SDK_ROOT_DIR"
-    
+
     # 1. 获取 Git 哈希
     GIT_HASH=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
     log_info "Git 哈希: $GIT_HASH"
-    
+
     # 2. 获取当前日期时间
     BUILD_DATE=$(date '+%Y%m%d')
     BUILD_TIME=$(date '+%H%M')
     log_info "构建日期: $BUILD_DATE"
     log_info "构建时间: $BUILD_TIME"
-    
+
     # 3. 从设备配置文件读取配置
     local device_mk_path="${SDK_ROOT_DIR}/${DEVICE_BASE_PATH}/${MODULE_NAME}/${MODULE_NAME}.mk"
-    
-    # 从设备配置文件中提取配置
-    PRODUCT_CUSTOM_CHIP=$(grep -E "^PRODUCT_CUSTOM_CHIP\s*:=" "$device_mk_path" 2>/dev/null | awk '{print $3}' || echo "RK3568")
-    PRODUCT_SYSTEM_PLATFORM=$(grep -E "^PRODUCT_SYSTEM_PLATFORM\s*:=" "$device_mk_path" 2>/dev/null | awk '{print $3}' || echo "A11")
-    PRODUCT_CHIPSET_NAME=$(grep -E "^PRODUCT_CHIPSET_NAME\s*:=" "$device_mk_path" 2>/dev/null | awk '{print $3}' || echo "ATBM6165")
-    PRODUCT_CUSTOM_VERSION=$(grep -E "^PRODUCT_CUSTOM_VERSION\s*:=" "$device_mk_path" 2>/dev/null | awk '{print $3}' || echo "V1.0.0")
+
+    PRODUCT_CUSTOM_CHIP=$(read_mk_meta "PRODUCT_CUSTOM_CHIP" "$device_mk_path")
+    PRODUCT_SYSTEM_PLATFORM=$(read_mk_meta "PRODUCT_SYSTEM_PLATFORM" "$device_mk_path")
+    PRODUCT_CHIPSET_NAME=$(read_mk_meta "PRODUCT_CHIPSET_NAME" "$device_mk_path")
+    PRODUCT_CUSTOM_VERSION=$(read_mk_meta "PRODUCT_CUSTOM_VERSION" "$device_mk_path")
 
     log_info "自定义芯片: $PRODUCT_CUSTOM_CHIP"
     log_info "系统平台: $PRODUCT_SYSTEM_PLATFORM"
@@ -505,7 +520,7 @@ show_summary() {
     echo "  Git 哈希:     $GIT_HASH"
     echo ""
     echo -e "${YELLOW}  上传命令:${NC}"
-    echo "  feasy_upload.sh ${IMAGES_OUTPUT_DIR}/${output_subdir}/${IMAGE_NAME}"
+    echo "  FTP_PASS="密码" feasy_upload.sh ${IMAGES_OUTPUT_DIR}/${output_subdir}/${IMAGE_NAME}"
     echo ""
 }
 
@@ -524,9 +539,9 @@ main() {
     start_time=$(date +%s)
     
     echo ""
-    echo -e "${CYAN}╔══════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║      Feasycom 模组测试镜像编译工具       ║${NC}"
-    echo -e "${CYAN}╚══════════════════════════════════════════╝${NC}"
+    echo -e "${CYAN}╔═══════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║      Feasycom 模组测试镜像编译工具 v1.0       ║${NC}"
+    echo -e "${CYAN}╚═══════════════════════════════════════════════╝${NC}"
     echo ""
     
     # 注册清理函数

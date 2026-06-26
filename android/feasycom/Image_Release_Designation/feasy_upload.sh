@@ -1,14 +1,21 @@
 #!/bin/bash
 # =============================================================================
-# feasy_upload.sh - 模组测试镜像自动化上传脚本 (v2.0)
+# feasy_upload.sh - 模组测试镜像自动化上传脚本 (v2.1)
 # 功能：自动解析镜像名、生成 Release Notes、打包 .zip、上传、追加 CHANGELOG
 # 安全机制：禁止覆盖已有文件、限制操作路径、镜像名合法性检查、CHANGELOG 审核门禁
+# FTP：自动检测本地挂载或 lftp 连接 ${FTP_HOST:-192.168.0.71}:${FTP_PORT:-20249}
 # =============================================================================
 
 set -euo pipefail
 
 # ===================== 配置区域 =====================
-# FTP 基础路径（请根据实际环境修改）
+# FTP 服务器配置（使用 lftp 连接）
+FTP_HOST="192.168.0.71"
+FTP_PORT="20249"
+# 用户名包含空格（"system develop.share"），lftp -u 参数整体引号包裹可保留空格
+FTP_USER="${FTP_USER:-system develop.share}"
+FTP_PASS="${FTP_PASS:-}"  # 优先从环境变量读取，为空则交互式输入
+# FTP 本地挂载路径（如果 FTP 已挂载到本地，可绕开 lftp 直接 cp）
 FTP_BASE_PATH="/srv/ftp/firmware"
 # 脚本可操作的路径前缀（安全限制）
 ALLOWED_PATH_PREFIX="10_系统开发版本"
@@ -36,6 +43,8 @@ RELEASE_NOTES_PATH=""
 IMG_NAME=""
 TEMP_DIR=""
 ZIP_FILE=""
+# FTP 连接模式（自动判定：true=lftp, false=本地挂载）
+FTP_USE_LFTP=false
 
 # ===================== 颜色输出 =====================
 RED='\033[0;31m'
@@ -92,16 +101,20 @@ usage() {
     -y, --yes                   跳过所有交互确认（版本冲突检查、CHANGELOG 审核等）
 
 示例:
-    $0 RK3568_A11_ATBM6165_BW8205_V1.0.0_Release_20260625_ab012388e4.img
+    FTP_PASS=your_passwd $0 RK3568_A11_ATBM6165_BW8205_V1.0.0_Release_20260625_ab012388e4.img
     $0 -d RK356X_A11_ATBM6165_BW8205_V1.0.0_Debug_20260625.1343.img
     $0 -n /path/to/CHANGELOG.md RK3568_A11_ATBM6165_BW8205_V1.0.0_Release_20260625_ab012388e4.img
     $0 -l /tmp/test_upload RK3568_A11_ATBM6165_BW8205_V1.0.0_Debug_20260625.1343.img
     $0 -y RK3568_A11_ATBM6165_BW8205_V1.0.0_Debug_20260625.1343.img
 
+FTP 服务器:
+    ${FTP_HOST}:${FTP_PORT} (用户: "${FTP_USER}", lftp)
+    (当路径 ${FTP_BASE_PATH} 不存在时自动使用 lftp，使用lftp时需要提供密码，可以通过设置环境变量FTP_PASS指定，否则用本地挂载)
+
 工作流程:
     1. 镜像名解析与校验              4. 审核发行说明 (CHECKED: yes)
     2. 路径安全检查                  5. 打包 .zip (内含镜像 + CHANGELOG.md)
-    3. 基于 git 提交自动生成 CHANGELOG  6. 上传到 FTP、更新全局 CHANGELOG、git commit
+    3. 基于 git 提交自动生成 CHANGELOG  6. lftp/cp 上传到 FTP、更新全局 CHANGELOG
 
 镜像命名规范:
     Debug:   [主控_芯片组]_[系统平台]_[模组芯片]_[模组型号]_[版本号]_Debug_[年月日].[时分].img
@@ -197,15 +210,38 @@ pre_checks() {
         exit 1
     fi
 
-    # 2. 检查 FTP 基础路径（仅非本地模式）
+    # 2. 检查 FTP 连接（仅非本地模式）
     if [[ "$LOCAL_MODE" == false ]]; then
-        if [[ ! -d "$FTP_BASE_PATH" ]]; then
-            log_error "FTP 基础路径不存在: $FTP_BASE_PATH"
-            exit 1
-        fi
-        if [[ ! -w "$FTP_BASE_PATH" ]]; then
-            log_error "没有 FTP 基础路径的写入权限: $FTP_BASE_PATH"
-            exit 1
+        if [[ -d "$FTP_BASE_PATH" ]]; then
+            # FTP 已挂载本地，直接使用文件系统操作
+            FTP_USE_LFTP=false
+            log_info "FTP 已挂载到本地: ${FTP_BASE_PATH}"
+            if [[ ! -w "$FTP_BASE_PATH" ]]; then
+                log_error "没有 FTP 基础路径的写入权限: $FTP_BASE_PATH"
+                exit 1
+            fi
+        else
+            # FTP 未挂载本地，使用 lftp 远程连接
+            if ! command -v lftp &>/dev/null; then
+                log_error "FTP 未挂载到本地 ${FTP_BASE_PATH}，且 lftp 未安装"
+                log_error "请安装 lftp 或将 FTP 挂载到本地路径"
+                log_error "  # apt install lftp    (Debian/Ubuntu)"
+                log_error "  # yum install lftp    (CentOS/RHEL)"
+                exit 1
+            fi
+            # 检查 FTP 密码
+            if [[ -z "$FTP_PASS" ]]; then
+                echo ""
+                read -r -s -p "请输入 FTP 密码（${FTP_USER}@${FTP_HOST}:${FTP_PORT}）: " FTP_PASS_INPUT
+                echo ""
+                if [[ -z "$FTP_PASS_INPUT" ]]; then
+                    log_error "FTP 密码不能为空"
+                    exit 1
+                fi
+                FTP_PASS="$FTP_PASS_INPUT"
+            fi
+            FTP_USE_LFTP=true
+            log_info "使用 lftp 连接: \"${FTP_USER}\"@${FTP_HOST}:${FTP_PORT}"
         fi
     else
         # 本地模式：检查目标目录（上级目录存在即可，目标目录随后创建）
@@ -238,7 +274,10 @@ pre_checks() {
     fi
 
     # 5. 检查必要工具
-    local required_tools=("zip" "git")
+    local required_tools=("zip")
+    if [[ "$SKIP_CHANGELOG" == false && -z "$RELEASE_NOTES_PATH" ]]; then
+        required_tools+=("git")
+    fi
     for tool in "${required_tools[@]}"; do
         if ! command -v "$tool" &>/dev/null; then
             log_error "必要工具未安装: $tool"
@@ -317,7 +356,11 @@ generate_target_path() {
     if [[ "$LOCAL_MODE" == true ]]; then
         # 本地模式：以用户指定的目录为根，保持相同的子目录结构
         echo "${LOCAL_TARGET_DIR}/${SOC_PLATFORM}_${OS_VER}/${CHIPSET}_Series/${MODULE_MODEL}/${BUILD_TYPE}/${VERSION}_${FOLDER_DATE}/"
+    elif [[ "$FTP_USE_LFTP" == true ]]; then
+        # lftp 模式：远程路径（相对于 FTP 根目录）
+        echo "/${ALLOWED_PATH_PREFIX}/${SOC_PLATFORM}_${OS_VER}/${CHIPSET}_Series/${MODULE_MODEL}/${BUILD_TYPE}/${VERSION}_${FOLDER_DATE}/"
     else
+        # 本地挂载模式：从挂载点开始
         echo "${FTP_BASE_PATH}/${ALLOWED_PATH_PREFIX}/${SOC_PLATFORM}_${OS_VER}/${CHIPSET}_Series/${MODULE_MODEL}/${BUILD_TYPE}/${VERSION}_${FOLDER_DATE}/"
     fi
 }
@@ -332,9 +375,15 @@ check_path_security() {
         log_debug "本地模式，跳过 FTP 路径前缀检查"
     else
         # 1. 检查路径是否在允许范围内（仅 FTP 模式）
-        if [[ ! "$target_path" == "${FTP_BASE_PATH}/${ALLOWED_PATH_PREFIX}"* ]]; then
+        local allowed_prefix
+        if [[ "$FTP_USE_LFTP" == true ]]; then
+            allowed_prefix="/${ALLOWED_PATH_PREFIX}"
+        else
+            allowed_prefix="${FTP_BASE_PATH}/${ALLOWED_PATH_PREFIX}"
+        fi
+        if [[ ! "$target_path" == "${allowed_prefix}"* ]]; then
             log_error "路径不在允许的操作范围内！"
-            log_error "允许前缀: ${FTP_BASE_PATH}/${ALLOWED_PATH_PREFIX}"
+            log_error "允许前缀: ${allowed_prefix}"
             log_error "目标路径: $target_path"
             return 1
         fi
@@ -358,20 +407,120 @@ check_path_security() {
     return 0
 }
 
+# ===================== FTP 远程操作（lftp 模式） =====================
+# 以下函数仅在 FTP_USE_LFTP=true 时使用
+#
+# 用户名包含空格（如 "system develop.share"），使用 -u "${FTP_USER},${FTP_PASS}"
+# 整体包裹的单参数形式，双引号内的空格被保留为 -u 参数的一部分。
+# lftp 按第一个逗号分隔 user 和 pass，详见：https://lftp.yar.ru/lftp-man.html
+#
+# 此前曾用 heredoc + set ftp:user/password 方案，但部分环境因用户名空格
+# 导致连接失败，故改用 -u 方案。
+
+lftp_exec() {
+    local cmd="$1"
+    # 用户名包含空格，如 "system develop.share"，-u 整体引号包裹可保留空格。
+    # 不使用 2>/dev/null 以便用户能看到 lftp 原始错误信息排障。
+    # 设置超时与重试参数，支持大文件上传（~700MB+）。
+    lftp -p "${FTP_PORT}" -u "${FTP_USER},${FTP_PASS}" "${FTP_HOST}" <<- EOF
+		set net:timeout 60
+		set net:max-retries 3
+		set net:reconnect-interval-base 10
+		set net:reconnect-interval-multiplier 2
+		${cmd}
+		quit
+	EOF
+    return $?
+}
+
+lftp_remote_file_exists() {
+    local remote_path="$1"
+    local dir
+    dir=$(dirname "$remote_path")
+    local file
+    file=$(basename "$remote_path")
+    # cd 到所在目录后用 ls -l 检查文件是否存在（cls 在此 FTP 服务器上对中文路径有 CWD 问题）
+    local result
+    result=$(lftp_exec "cd ${dir} && ls -l ${file}" 2>/dev/null) || true
+    if echo "$result" | grep -q "^-[^ ]"; then
+        return 0
+    fi
+    return 1
+}
+
+lftp_remote_dir_exists() {
+    local remote_path="$1"
+    # cd 到目录，成功即存在（比 du/ls 更可靠，避免中文路径误判）
+    if lftp_exec "cd ${remote_path}" >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+lftp_list_remote_dirs() {
+    local parent="$1"
+    local pattern="$2"
+    # 列出远程目录下匹配 pattern 的目录名
+    lftp_exec "cls -1 ${parent}/${pattern}" || true
+}
+
+lftp_mkdir_remote() {
+    local remote_dir="$1"
+    local output
+    # mkdir -p 在目录已存在时部分 FTP 服务器返回 550（"already exists"），视为成功
+    output=$(lftp_exec "mkdir -p ${remote_dir}" 2>&1) || true
+    if [[ -n "$output" && "$output" != *"already exists"* ]]; then
+        echo "$output" >&2
+        return 1
+    fi
+    return 0
+}
+
+lftp_put_remote() {
+    local local_file="$1"
+    local remote_dir="$2"
+    lftp_exec "put -O ${remote_dir} ${local_file}" || return 1
+}
+
+lftp_get_remote_file_size() {
+    local remote_file="$1"
+    local dir
+    dir=$(dirname "$remote_file")
+    local file
+    file=$(basename "$remote_file")
+    # cd 到目录后 ls -l 单独文件，解析第 5 字段（字节大小），避免 cls 的 CWD 问题
+    lftp_exec "cd ${dir} && ls -l ${file}" 2>/dev/null | awk '/^-/{print $5}' || echo 0
+}
+
 # ===================== 文件存在性检查 =====================
 check_file_exists() {
     local target_path="$1"
     local filename="$2"
     local target_file="${target_path}${filename}"
 
-    if [[ -f "$target_file" ]]; then
-        if [[ "$FORCE" == true ]]; then
-            log_warn "目标文件已存在，将强制覆盖: $target_file"
-            return 0
-        else
-            log_error "目标文件已存在，禁止覆盖: $target_file"
-            log_error "如需强制覆盖，请使用 -f 选项"
-            return 1
+    if [[ "$FTP_USE_LFTP" == true ]]; then
+        # 远程检查
+        if lftp_remote_file_exists "${target_file}"; then
+            if [[ "$FORCE" == true ]]; then
+                log_warn "远程目标文件已存在，将强制覆盖: ${target_file}"
+                return 0
+            else
+                log_error "远程目标文件已存在，禁止覆盖: ${target_file}"
+                log_error "如需强制覆盖，请使用 -f 选项"
+                return 1
+            fi
+        fi
+    else
+        # 本地检查
+        if [[ -f "$target_file" ]]; then
+            if [[ "$FORCE" == true ]]; then
+                log_warn "目标文件已存在，将强制覆盖: $target_file"
+                return 0
+            else
+                log_error "目标文件已存在，禁止覆盖: $target_file"
+                log_error "如需强制覆盖，请使用 -f 选项"
+                return 1
+            fi
         fi
     fi
     return 0
@@ -390,15 +539,26 @@ check_version_conflict() {
     log_step "镜像版本检查"
 
     # 从 target_path 反推版本目录的父目录（Debug/Release 所在层级）
-    # target_path = .../Debug/V1.0.0_xxx/  →  parent = .../Debug/
     local version_parent
     version_parent=$(dirname "${target_path%/*}")
 
-    # 查找同版本前缀的已有目录（目录可能不存在，|| true 防止 set -e 中断）
-    local existing_dirs
-    existing_dirs=""
-    if [[ -d "$version_parent" ]]; then
-        existing_dirs=$(find "$version_parent" -maxdepth 1 -type d -name "${VERSION}_*" 2>/dev/null | sort || true)
+    # 查找同版本前缀的已有目录
+    local existing_dirs=""
+
+    if [[ "$FTP_USE_LFTP" == true ]]; then
+        # 远程检查
+        local parent_dir
+        parent_dir=$(dirname "$version_parent")
+        local version_base
+        version_base=$(basename "$version_parent")
+        existing_dirs=$(lftp_exec "cd ${parent_dir} 2>/dev/null; ls -d ${version_base}/${VERSION}_* 2>/dev/null" 2>&1 || true)
+        # 转换为 basename-only 格式
+        existing_dirs=$(echo "$existing_dirs" | while IFS= read -r line; do basename "$line"; done)
+    else
+        # 本地检查
+        if [[ -d "$version_parent" ]]; then
+            existing_dirs=$(find "$version_parent" -maxdepth 1 -type d -name "${VERSION}_*" 2>/dev/null | sort || true)
+        fi
     fi
 
     if [[ -z "$existing_dirs" ]]; then
@@ -412,13 +572,11 @@ check_version_conflict() {
     echo ""
     local count=0
     while IFS= read -r dir; do
-        local dir_name
-        dir_name=$(basename "$dir")
-        # 跳过当前正在上传的目标目录本身（如果已被创建）
-        if [[ "$dir/" == "$target_path" ]]; then
+        # 跳过当前正在上传的目标目录本身
+        if [[ "$dir" == "${VERSION}_${FOLDER_DATE}" ]]; then
             continue
         fi
-        echo "  ${YELLOW}▶${NC} ${dir_name}"
+        echo "  ${YELLOW}▶${NC} ${dir}"
         count=$((count + 1))
     done <<< "$existing_dirs"
 
@@ -445,7 +603,7 @@ check_version_conflict() {
 
     echo -e "${YELLOW}══════════════════════════════════════════════════════════════${NC}"
     echo -e "${YELLOW}  ⚠️  版本 ${VERSION} 已在 FTP 上存在以上镜像                 ${NC}"
-    echo -e "${YELLOW}  继续上传将产生同版本下的多个镜像目录                         ${NC}"
+    echo -e "${YELLOW}  继续上传将产生同版本下的多个镜像目录                        ${NC}"
     echo -e "${YELLOW}══════════════════════════════════════════════════════════════${NC}"
     echo ""
     read -r -p "是否继续上传？(y/N): " confirm
@@ -650,7 +808,27 @@ package_image() {
 
     # 3. 生成完整的 CHANGELOG.md（当前条目 + 已有全局历史，新版本在上方）
     local full_changelog="${TEMP_DIR}/${CHANGELOG_FILE}"
-    if [[ -f "$global_changelog_path" ]]; then
+    local remote_changelog_tmp=""
+
+    if [[ "$FTP_USE_LFTP" == true ]]; then
+        # lftp 模式：尝试下载远程全局 CHANGELOG.md
+        remote_changelog_tmp=$(mktemp)
+        if lftp_exec "get ${global_changelog_path} -o ${remote_changelog_tmp}" 2>/dev/null; then
+            log_info "发现远程已有全局 CHANGELOG.md，追加当前发行说明..."
+            {
+                echo "$current_entry"
+                echo ""
+                echo "---"
+                echo ""
+                cat "$remote_changelog_tmp"
+            } > "$full_changelog"
+        else
+            log_info "首次发行（远程无 CHANGELOG.md），创建新的发行说明..."
+            echo "$current_entry" > "$full_changelog"
+        fi
+        rm -f "$remote_changelog_tmp"
+    elif [[ -f "$global_changelog_path" ]]; then
+        # 本地挂载模式：直接读取文件
         log_info "发现已有全局 CHANGELOG.md，追加当前发行说明..."
         {
             echo "$current_entry"
@@ -702,28 +880,54 @@ upload_file() {
     log_info "  目标:   ${target_file}"
 
     if [[ "$DRY_RUN" == true ]]; then
-        log_info "[模拟] cp ${ZIP_FILE} -> ${target_file}"
+        if [[ "$FTP_USE_LFTP" == true ]]; then
+            log_info "[模拟] lftp put ${ZIP_FILE} -> ${target_path}"
+        else
+            log_info "[模拟] cp ${ZIP_FILE} -> ${target_file}"
+        fi
         return 0
     fi
 
-    # 复制文件
-    if cp "$ZIP_FILE" "$target_file"; then
-        chmod 644 "$target_file"
-
-        # 完整性校验：比较文件大小
-        local src_size
-        src_size=$(stat -c%s "$ZIP_FILE" 2>/dev/null || stat -f%z "$ZIP_FILE" 2>/dev/null)
-        local tgt_size
-        tgt_size=$(stat -c%s "$target_file" 2>/dev/null || stat -f%z "$target_file" 2>/dev/null)
-
-        if [[ "$src_size" -eq "$tgt_size" ]]; then
-            log_info "✅ 上传成功，完整性验证通过"
+    # 上传文件
+    local upload_ok=false
+    if [[ "$FTP_USE_LFTP" == true ]]; then
+        # 通过 lftp 上传
+        log_debug "执行 lftp put..."
+        if lftp_put_remote "$ZIP_FILE" "$target_path"; then
+            upload_ok=true
+            log_info "✅ lftp 上传成功"
         else
-            log_warn "文件大小不匹配: src=${src_size} dst=${tgt_size}"
+            log_error "lftp 上传失败"
             return 1
         fi
     else
-        log_error "上传失败"
+        # 本地文件系统复制
+        if cp "$ZIP_FILE" "$target_file"; then
+            chmod 644 "$target_file"
+            upload_ok=true
+        else
+            log_error "上传失败"
+            return 1
+        fi
+    fi
+
+    # 完整性校验：比较文件大小
+    local src_size
+    src_size=$(stat -c%s "$ZIP_FILE" 2>/dev/null || stat -f%z "$ZIP_FILE" 2>/dev/null)
+    local tgt_size=0
+
+    if [[ "$FTP_USE_LFTP" == true ]]; then
+        tgt_size=$(lftp_get_remote_file_size "${target_file}" 2>/dev/null)
+    else
+        tgt_size=$(stat -c%s "$target_file" 2>/dev/null || stat -f%z "$target_file" 2>/dev/null)
+    fi
+
+    if [[ "$src_size" -eq "$tgt_size" ]]; then
+        log_info "✅ 上传成功，完整性验证通过"
+    elif [[ "$tgt_size" -eq 0 ]]; then
+        log_warn "无法获取远程文件大小，跳过完整性验证"
+    else
+        log_warn "文件大小不匹配: src=${src_size} dst=${tgt_size}"
         return 1
     fi
 
@@ -748,40 +952,74 @@ update_global_changelog() {
     fi
 
     if [[ "$DRY_RUN" == true ]]; then
-        log_info "[模拟] cp ${full_source} → ${global_changelog}"
+        if [[ "$FTP_USE_LFTP" == true ]]; then
+            log_info "[模拟] lftp put ${full_source} → ${global_parent}/"
+        else
+            log_info "[模拟] cp ${full_source} → ${global_changelog}"
+        fi
         return 0
     fi
 
-    cp "$full_source" "$global_changelog"
-    chmod 644 "$global_changelog"
-    log_info "✅ 全局 CHANGELOG.md 已更新"
+    if [[ "$FTP_USE_LFTP" == true ]]; then
+        # 通过 lftp 上传全局 CHANGELOG
+        if lftp_put_remote "$full_source" "$global_parent"; then
+            log_info "✅ 全局 CHANGELOG.md 已更新（lftp）"
+        else
+            log_warn "全局 CHANGELOG.md 远程上传失败"
+        fi
+        # 同时在版本目录也上传一份副本
+        if [[ "$target_path" != "$global_parent" ]]; then
+            lftp_mkdir_remote "$target_path"
+            if lftp_put_remote "$full_source" "$target_path"; then
+                log_info "✅ 版本目录副本已上传: ${target_path}${CHANGELOG_FILE}"
+            fi
+        fi
+    else
+        cp "$full_source" "$global_changelog"
+        chmod 644 "$global_changelog"
+        log_info "✅ 全局 CHANGELOG.md 已更新"
 
-    # 同时在版本目录中也拷贝一份副本
-    local version_copy="${target_path}${CHANGELOG_FILE}"
-    if [[ "$target_path" != "$global_parent" ]]; then
-        cp "$full_source" "$version_copy"
-        chmod 644 "$version_copy"
-        log_info "✅ 版本目录副本已保存: ${version_copy}"
+        # 同时在版本目录中也拷贝一份副本
+        local version_copy="${target_path}${CHANGELOG_FILE}"
+        if [[ "$target_path" != "$global_parent" ]]; then
+            cp "$full_source" "$version_copy"
+            chmod 644 "$version_copy"
+            log_info "✅ 版本目录副本已保存: ${version_copy}"
+        fi
     fi
 }
 
 # ===================== 生成上传报告 =====================
 generate_upload_report() {
     local target_path="$1"
-    local report_file="${target_path}upload_report.txt"
+    local report_file="upload_report.txt"
 
     log_info "生成上传报告..."
     if [[ "$DRY_RUN" == true ]]; then
-        log_info "[模拟] 生成报告: ${report_file}"
+        log_info "[模拟] 生成报告: ${target_path}${report_file}"
         return 0
     fi
 
     local zip_basename
     zip_basename=$(basename "$ZIP_FILE")
-    local zip_size
-    zip_size=$(stat -c%s "$target_path${zip_basename}" 2>/dev/null | awk '{printf "%.1f MB", $1/1024/1024}')
+    local zip_size="未知"
 
-    cat > "$report_file" << REPORT_EOF
+    if [[ "$FTP_USE_LFTP" == true ]]; then
+        local rmt_bytes
+        rmt_bytes=$(lftp_get_remote_file_size "${target_path}${zip_basename}" 2>/dev/null)
+        if [[ "$rmt_bytes" -gt 0 ]]; then
+            zip_size=$(echo "$rmt_bytes" | awk '{printf "%.1f MB", $1/1024/1024}')
+        fi
+    else
+        if [[ -f "${target_path}${zip_basename}" ]]; then
+            zip_size=$(stat -c%s "${target_path}${zip_basename}" 2>/dev/null | awk '{printf "%.1f MB", $1/1024/1024}')
+        fi
+    fi
+
+    # 生成本地临时报告文件
+    local temp_report
+    temp_report=$(mktemp)
+    cat > "$temp_report" << REPORT_EOF
 ========================================
   模组测试镜像上传报告
 ========================================
@@ -789,6 +1027,7 @@ generate_upload_report() {
 上传时间: $(date '+%Y-%m-%d %H:%M:%S')
 上传用户: $(whoami)
 上传主机: $(hostname)
+${FTP_HOST:+FTP 服务器: ${FTP_HOST}:${FTP_PORT}}
 
 镜像信息:
   镜像文件:   $(basename "$IMG_NAME")
@@ -803,13 +1042,24 @@ generate_upload_report() {
   ${GIT_HASH:+Git 哈希: ${GIT_HASH}}
 
 存储路径:    ${target_path}
-压缩包大小:  ${zip_size:-未知}
+压缩包大小:  ${zip_size}
 
 ========================================
 REPORT_EOF
 
-    chmod 644 "$report_file"
-    log_info "✅ 上传报告已生成"
+    if [[ "$FTP_USE_LFTP" == true ]]; then
+        # 上传报告到远程
+        if lftp_put_remote "$temp_report" "$target_path"; then
+            log_info "✅ 上传报告已生成（远程）"
+        else
+            log_warn "上传报告远程上传失败"
+        fi
+    else
+        cp "$temp_report" "${target_path}${report_file}"
+        chmod 644 "${target_path}${report_file}"
+        log_info "✅ 上传报告已生成"
+    fi
+    rm -f "$temp_report"
 }
 
 # ===================== 发布后提交（已禁用） =====================
@@ -856,7 +1106,7 @@ main() {
 
     echo ""
     echo -e "${CYAN}╔══════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║     Feasycom 模组测试镜像上传工具 v2.0   ║${NC}"
+    echo -e "${CYAN}║     Feasycom 模组测试镜像上传工具 v2.1   ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════╝${NC}"
     echo ""
 
@@ -929,13 +1179,33 @@ main() {
         exit 1
     fi
 
-    # 11. 创建目标目录
+    # 11. 创建目标目录（目录已存在则跳过）
     if [[ "$DRY_RUN" == true ]]; then
-        log_info "[模拟] mkdir -p ${target_path} && chmod 755"
+        if [[ "$FTP_USE_LFTP" == true ]]; then
+            log_info "[模拟] lftp mkdir -p ${target_path}"
+        else
+            log_info "[模拟] mkdir -p ${target_path} && chmod 755"
+        fi
     else
-        mkdir -p "$target_path"
-        chmod 755 "$target_path"
-        log_info "目录已创建/确认: ${target_path}"
+        if [[ "$FTP_USE_LFTP" == true ]]; then
+            if lftp_remote_dir_exists "$target_path"; then
+                log_info "目标目录已存在，跳过创建: ${target_path}"
+            else
+                if ! lftp_mkdir_remote "$target_path"; then
+                    log_error "远程目录创建失败: ${target_path}"
+                    exit 1
+                fi
+                log_info "远程目录已创建: ${target_path}"
+            fi
+        else
+            if [[ ! -d "$target_path" ]]; then
+                mkdir -p "$target_path"
+                chmod 755 "$target_path"
+                log_info "本地目录已创建: ${target_path}"
+            else
+                log_info "本地目录已存在，跳过创建: ${target_path}"
+            fi
+        fi
     fi
 
     # 12. 上传 .zip
