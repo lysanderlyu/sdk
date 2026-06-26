@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# feasy_upload.sh - 模组测试镜像自动化上传脚本 (v2.1)
+# feasy_upload.sh - 模组测试镜像自动化上传脚本 (v2.2)
 # 功能：自动解析镜像名、生成 Release Notes、打包 .zip、上传、追加 CHANGELOG
 # 安全机制：禁止覆盖已有文件、限制操作路径、镜像名合法性检查、CHANGELOG 审核门禁
 # FTP：自动检测本地挂载或 lftp 连接 ${FTP_HOST:-192.168.0.71}:${FTP_PORT:-20249}
@@ -546,14 +546,9 @@ check_version_conflict() {
     local existing_dirs=""
 
     if [[ "$FTP_USE_LFTP" == true ]]; then
-        # 远程检查
-        local parent_dir
-        parent_dir=$(dirname "$version_parent")
-        local version_base
-        version_base=$(basename "$version_parent")
-        existing_dirs=$(lftp_exec "cd ${parent_dir} 2>/dev/null; ls -d ${version_base}/${VERSION}_* 2>/dev/null" 2>&1 || true)
-        # 转换为 basename-only 格式
-        existing_dirs=$(echo "$existing_dirs" | while IFS= read -r line; do basename "$line"; done)
+        # 远程检查：先 cd 到 Release/Debug 目录，再用 cls -d 匹配同版本号的子目录
+        existing_dirs=$(lftp_exec "cd ${version_parent} && cls -d ${VERSION}_*") || true
+        # cls -d 输出已经是 basename，直接使用
     else
         # 本地检查
         if [[ -d "$version_parent" ]]; then
@@ -1048,8 +1043,8 @@ ${FTP_HOST:+FTP 服务器: ${FTP_HOST}:${FTP_PORT}}
 REPORT_EOF
 
     if [[ "$FTP_USE_LFTP" == true ]]; then
-        # 上传报告到远程
-        if lftp_put_remote "$temp_report" "$target_path"; then
+        # 上传报告到远程（用 -o 指定目标文件名，避免 mktemp 的随机名）
+        if lftp_exec "put -O ${target_path} ${temp_report} -o ${report_file}"; then
             log_info "✅ 上传报告已生成（远程）"
         else
             log_warn "上传报告远程上传失败"
