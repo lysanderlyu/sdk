@@ -394,9 +394,12 @@ check_version_conflict() {
     local version_parent
     version_parent=$(dirname "${target_path%/*}")
 
-    # 查找同版本前缀的已有目录
+    # 查找同版本前缀的已有目录（目录可能不存在，|| true 防止 set -e 中断）
     local existing_dirs
-    existing_dirs=$(find "$version_parent" -maxdepth 1 -type d -name "${VERSION}_*" 2>/dev/null | sort)
+    existing_dirs=""
+    if [[ -d "$version_parent" ]]; then
+        existing_dirs=$(find "$version_parent" -maxdepth 1 -type d -name "${VERSION}_*" 2>/dev/null | sort || true)
+    fi
 
     if [[ -z "$existing_dirs" ]]; then
         log_info "未发现同版本的已有镜像，继续"

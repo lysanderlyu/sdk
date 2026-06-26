@@ -43,26 +43,29 @@
 3. `Release Notes文件路径`：除了镜像.zip压缩包同级目录存放这一个全局的Release Notes，每一个单独的压缩包内部应当在打包img时同时打包一个只全局CHANGELOG.md，目的是当发送zip镜像包时解包能看到CHANGELOG.md，在FTP浏览镜像时也能通过zip同级目录有个CHANGELOG.md查阅。
 
 ### 发行说明放置位置参考
-对于`RK3568_A11_ATBM6165_BW8205_V1.0.0_Release_20260625_ab012388e4.zip` 和 `RK3568_A11_ATBM6165_BW8205_V1.0.0_Debug_20260624.1224.zip` 有以下存储规则
-```txt
+对于`RK3568_A11_ATBM6165_BW8205_V1.0.0_Release_20260626_ab012388e4.zip` 和 `RK3568_A11_ATBM6165_BW8205_V1.0.0_Debug_20260626.0900.zip` 有以下存储规则
 
-```plain
-├── FTP
-│   ├── RK3568_A11
-│   │   ├── ATBM6165_Series
-│   │   │   ├── BW501GI
-│   │   │   └── BW8205
-│   │   │       ├── Debug
-│   │   │           ├── CHANGELOG.md
-│   │   │       │   ├── RK3568_A11_ATBM6165_BW8205_V1.0.0_Debug_20260624.1224.zip
-│   │   │       │   ├── RK3568_A11_ATBM6165_BW8205_V1.0.0_Debug_20260625.1334.zip
-│   │   │       │   └── RK3568_A11_ATBM6165_BW8205_V1.0.1_Debug_20260625.1634.zip
-│   │   │       └── Release
-│   │   │           ├── CHANGELOG.md
-│   │   │           ├── RK3568_A11_ATBM6165_BW8205_V1.0.0_Release_20260625_ab012388e4.zip
-│   │   │           └── RK3568_A11_ATBM6165_BW8205_V1.0.1_Release_20260626_a0400dedca.zip
+```txt
+FTP/
+├── RK3568_A11
+│   ├── ATBM6165_Series
+│   │   ├── BW8205
+│   │   │   ├── Debug
+│   │   │   │   ├── V1.0.0_20260625_1820
+│   │   │   │   ├── V1.0.0_20260626_0900
+│   │   │   │   │   ├── CHANGELOG.md
+│   │   │   │   │   ├── RK3568_A11_ATBM6165_BW8205_V1.0.0_Debug_20260626.0900.zip
+│   │   │   │   │   └── upload_report.txt
+│   │   │   │   └── CHANGELOG.md
+│   │   │   └── Release
+│   │   │       ├── V1.0.0_20260626_ab012388e4
+│   │   │       │   ├── CHANGELOG.md
+│   │   │       │   ├── RK3568_A11_ATBM6165_BW8205_V1.0.0_Release_20260626_ab012388e4.zip
+│   │   │       │   └── upload_report.txt
+│   │   │       └── CHANGELOG.md
 │   │   └── RTL8821CS_Series
-│   ├── RK3568_UBUNTU2204
+│   │       └── BW121
+│   ├── RK3568_Ubuntu2204
 │   └── RK3588_A11
 ```
 
@@ -134,22 +137,26 @@
 对于当前需求，主要是区分1.SOC芯片，2.OS系统，3.模组芯片，以及4.镜像类型，可以考虑使用以下目录结构
 
 ```plain
-├── FTP
-│   ├── RK3568_A11
-│   │   ├── ATBM6165_Series
-│   │   │   ├── BW501GI
-│   │   │   └── BW8205
-│   │   │       ├── Debug
-│   │   │           ├── CHANGELOG.md
-│   │   │       │   ├── RK3568_A11_ATBM6165_BW8205_V1.0.0_Debug_20260624.1224.zip
-│   │   │       │   ├── RK3568_A11_ATBM6165_BW8205_V1.0.0_Debug_20260625.1334.zip
-│   │   │       │   └── RK3568_A11_ATBM6165_BW8205_V1.0.1_Debug_20260625.1634.zip
-│   │   │       └── Release
-│   │   │           ├── CHANGELOG.md
-│   │   │           ├── RK3568_A11_ATBM6165_BW8205_V1.0.0_Release_20260625_ab012388e4.zip
-│   │   │           └── RK3568_A11_ATBM6165_BW8205_V1.0.1_Release_20260626_a0400dedca.zip
+FTP/
+├── RK3568_A11
+│   ├── ATBM6165_Series
+│   │   ├── BW8205
+│   │   │   ├── Debug
+│   │   │   │   ├── V1.0.0_20260625_1820
+│   │   │   │   ├── V1.0.0_20260626_0900
+│   │   │   │   │   ├── CHANGELOG.md
+│   │   │   │   │   ├── RK3568_A11_ATBM6165_BW8205_V1.0.0_Debug_20260626.0900.zip
+│   │   │   │   │   └── upload_report.txt
+│   │   │   │   └── CHANGELOG.md
+│   │   │   └── Release
+│   │   │       ├── V1.0.0_20260626_ab012388e4
+│   │   │       │   ├── CHANGELOG.md
+│   │   │       │   ├── RK3568_A11_ATBM6165_BW8205_V1.0.0_Release_20260626_ab012388e4.zip
+│   │   │       │   └── upload_report.txt
+│   │   │       └── CHANGELOG.md
 │   │   └── RTL8821CS_Series
-│   ├── RK3568_UBUNTU2204
+│   │       └── BW121
+│   ├── RK3568_Ubuntu2204
 │   └── RK3588_A11
 ```
 
@@ -169,10 +176,12 @@
 
 | 示例 | 具体内容 | 脚本结果 |
 | --------------- | --------------- | --------------- |
-| `feasy_build.sh -h` | 显示脚本使用说明 | 打印当前脚本用法 |
-| `feasy_build.sh -m BW8205` | 也就是source，lunch BW8205，build.sh -UKAup 集为一体便捷版 | 结果和原生`./build.sh -UKAup` 相同 |
-| `feasy_build.sh -m BW8205 -d` | 编译并生成Debug调试固件 | 在SDK IMAGES/DEBUG/ 下生成 RK356X_A11_ATBM6165_BW8205_V1.0.0_Debug_20260625.1343.img |
-| `feasy_build.sh -m BW8205 -r` | 编译并生成Release发行版固件，这个会检查当前是否有未提交的更改 | 在SDK IMAGES/RELEASE/ 下生成RK356X_A11_ATBM6165_BW8205_V1.0.0_Release_20260625_ab012388e4.img |
+| `feasy_build.sh -h` | 显示脚本使用说明 | 打印当前脚本用法、镜像命名规范、配置要求 |
+| `feasy_build.sh -m BW8205` | source，lunch BW8205，`build.sh -UKAup` 集为一体便捷版（默认Debug模式） | 结果和原生 `./build.sh -UKAup` 相同，生成Debug镜像到 `IMAGES/DEBUG/` |
+| `feasy_build.sh -m BW8205 -d` | 编译并生成Debug调试固件 | 在 `IMAGES/DEBUG/` 下生成 `RK356X_A11_ATBM6165_BW8205_V1.0.0_Debug_20260625.1343.img` |
+| `feasy_build.sh -m BW8205 -r` | 编译并生成Release发行版固件，检查Git未提交的修改 | 在 `IMAGES/RELEASE/` 下生成 `RK356X_A11_ATBM6165_BW8205_V1.0.0_Release_20260625_ab012388e4.img` |
+| `feasy_build.sh -m BW8205 -c -u` | 先 clean 再更新 submodules 后编译 | 清理构建产物后拉取最新submodules再执行编译流程 |
+| `feasy_build.sh -m BW8205 -d -v` | Debug编译 + 详细输出模式 | 编译过程中输出更多调试信息，便于排查编译问题 |
 
 - 为了适配自动化生成脚本生成正确的固件名，比如自动获取 1.SoC平台，2. OS平台，3.模组芯片类型，4.版本号，这四个信息的定义需要在`device.mk`中新增四行，用于给`feasy_build.sh`脚本动态获取:
 
@@ -184,9 +193,16 @@
 
 ### 自动化脚本上传固件
 
-| 示例 | 描述 | 脚本结果 |
+| 示例 | 具体内容 | 脚本结果 |
 | --------------- | --------------- | --------------- |
-| Item1.1 | Item2.1 | Item3.1 |
+| `feasy_upload.sh -h` | 显示脚本使用说明 | 打印当前脚本用法、镜像命名规范、路径规则 |
+| `feasy_upload.sh <镜像文件>.img` | 基本模式：解析镜像名、生成模板发行说明、等待审核确认后打包上传FTP | 上传镜像到 `FTP/{路径}/{版本}_{日期}/`，生成`.zip`压缩包（内含`CHANGELOG.md`），更新全局`CHANGELOG.md`，生成`upload_report.txt` |
+| `feasy_upload.sh -l <目录> <镜像文件>.img` | 本地模式：上传到本地指定目录（不上传FTP），用于测试验证 | 文件上传到 `<目录>/` 下保持相同的分层子目录结构，其余流程不变 |
+| `feasy_upload.sh -s <镜像文件>.img` | 跳过CHANGELOG人工审核流程（CI自动化使用） | 直接生成默认CHANGELOG.md，跳过审核门禁 |
+| `feasy_upload.sh -n <CHANGELOG文件> <镜像文件>.img` | 使用外部指定CHANGELOG文件，跳过自动生成模板 | 将指定文件内容作为发行说明打包进zip |
+| `feasy_upload.sh -d <镜像文件>.img` | 模拟运行（Dry-Run），不实际拷贝或上传 | 输出每一步将要执行的操作，便于提前排查问题 |
+| `feasy_upload.sh -y <镜像文件>.img` | 跳过所有交互确认（版本冲突检查、CHANGELOG审核等） | 全自动静默执行，适用于已确认的场景 |
+| `feasy_upload.sh -f <镜像文件>.img` | 强制覆盖FTP上已存在的同名文件（谨慎使用） | 同路径已有文件时不再报错中断，直接覆盖 |
 
 > 固件上传脚本应有以下功能：
 

@@ -79,10 +79,12 @@ usage() {
     -v, --verbose               详细输出模式
 
 示例:
-    $0 -m BW8205                  # 编译 Release 版 BW8205 固件
-    $0 -m BW8205 -d               # 编译 Debug 版 BW8205 固件
-    $0 -m BW8205 -c -u            # 清理并更新 submodules 后编译
-    $0 -m BW8205 -d -v            # 编译 Debug 版并显示详细输出
+    $0 -h                             显示此帮助信息
+    $0 -m BW8205                      一键编译 Debug 版 BW8205 固件（默认，source + lunch + build.sh -UKAup）
+    $0 -m BW8205 -d                   编译 Debug 调试版 BW8205 固件
+    $0 -m BW8205 -r                   编译 Release 发行版 BW8205 固件（检查 Git 未提交修改）
+    $0 -m BW8205 -c -u                先 clean 并更新 submodules 后编译
+    $0 -m BW8205 -d -v                Debug 编译 + 详细输出
 
 说明:
     Debug调试版命名:   [项目主控_芯片组]_[系统平台]_[模组芯片]_[模组型号]_[版本号]_Debug_[年月日].[时分].img
