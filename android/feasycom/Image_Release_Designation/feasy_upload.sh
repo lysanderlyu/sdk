@@ -638,7 +638,7 @@ generate_changelog_template() {
     cat > "$temp_file" << TEMPLATE_EOF
 # Release Notes
 
-## [${VERSION}]
+## [${VERSION}] $(date '+%Y-%m-%d %H:%M')
 
 > **Build:** ${BUILD_TIME:-${DATE_FORMATTED}}
 > **Upload:** $(date '+%Y-%m-%d %H:%M')
@@ -696,7 +696,7 @@ TEMPLATE_EOF
         cat > "${SDK_ROOT_DIR}/${CHANGELOG_TEMP}" << CHG_EOF
 # Release Notes
 
-## [${VERSION}]
+## [${VERSION}] $(date '+%Y-%m-%d %H:%M')
 
 > **Build:** ${BUILD_TIME:-${DATE_FORMATTED}}
 > **Upload:** $(date '+%Y-%m-%d %H:%M')
@@ -790,8 +790,9 @@ package_image() {
         # 生成最小版本
         log_warn "未找到任何 CHANGELOG 来源，生成默认版本"
         current_entry=$(
-            printf '# Release Notes\n\n## [%s]\n\n> **Build:** %s\n> **Upload:** %s\n\n### Added\n- %s %s 驱动支持\n\n---\n' \
-                "$VERSION" "${BUILD_TIME:-$DATE_FORMATTED}" "$(date '+%Y-%m-%d %H:%M')" \
+            printf '# Release Notes\n\n## [v%s] %s\n\n> **Build:** %s\n> **Upload:** %s\n\n### Added\n- %s %s 驱动支持\n\n---\n' \
+                "$VERSION" "$(date '+%Y-%m-%d %H:%M')" \
+                "${BUILD_TIME:-$DATE_FORMATTED}" "$(date '+%Y-%m-%d %H:%M')" \
                 "$CHIPSET" "$MODULE_MODEL"
         )
     fi
