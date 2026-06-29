@@ -166,6 +166,7 @@ FTP/
 
 - 应有`feasy_build.sh`自动化脚本生成固件，为了方便和RK平台兼容性，`feasy_build.sh`构建脚本沿用RK官方`build.sh`编译打包镜像操作，`feasy_build.sh`脚本只用于快速发布固件，避免人为编译发行版时生成了有本地修改但未提交git记录的源码生成的固件
 - 应有`feasy_upload.sh`自动化脚本上传固件，并由专门的测试人员负责上传动作
+- 对于编译固件，应有一个`build_info.txt`文件记录固件构建情况。
 
 
 ## 方案
@@ -178,12 +179,51 @@ FTP/
 | --------------- | --------------- | --------------- |
 | `feasy_build.sh -h` | 显示脚本使用说明 | 打印当前脚本用法、镜像命名规范、配置要求 |
 | `feasy_build.sh -m BW8205` | source，lunch BW8205，`build.sh -UKAup` 集为一体便捷版（默认Debug模式） | 结果和原生 `./build.sh -UKAup` 相同，生成Debug镜像到 `IMAGES/DEBUG/` |
-| `feasy_build.sh -m BW8205 -d` | 编译并生成Debug调试固件 | 在 `IMAGES/DEBUG/` 下生成 `RK356X_A11_ATBM6165_BW8205_V1.0.0_Debug_20260625.1343.img` |
-| `feasy_build.sh -m BW8205 -r` | 编译并生成Release发行版固件，检查Git未提交的修改 | 在 `IMAGES/RELEASE/` 下生成 `RK356X_A11_ATBM6165_BW8205_V1.0.0_Release_20260625_ab012388e4.img` |
+| `feasy_build.sh -m BW8205 -d` | 编译并生成Debug调试固件以及当前工作目录的git diff记录文件 | 在 `IMAGES/DEBUG/RK3568_A11_ATBM6165_BW8205_V1.0.0_Debug_20260625.1343` 下生成 `RK3568_A11_ATBM6165_BW8205_V1.0.0_Debug_20260625.1343.img` 并生成编译报告|
+| `feasy_build.sh -m BW8205 -r` | 编译并生成Release发行版固件，检查Git未提交的修改 | 在 `IMAGES/RELEASE/RK3568_A11_ATBM6165_BW8205_V1.0.0_Release_20260625_ab012388e4/` 下生成 `RK3568_A11_ATBM6165_BW8205_V1.0.0_Release_20260625_ab012388e4.img` |
 | `feasy_build.sh -m BW8205 -c -u` | 先 clean 再更新 submodules 后编译 | 清理构建产物后拉取最新submodules再执行编译流程 |
 | `feasy_build.sh -m BW8205 -d -v` | Debug编译 + 详细输出模式 | 编译过程中输出更多调试信息，便于排查编译问题 |
 
-- 为了适配自动化生成脚本生成正确的固件名，比如自动获取 1.SoC平台，2. OS平台，3.模组芯片类型，4.版本号，这四个信息的定义需要在`device.mk`中新增四行，用于给`feasy_build.sh`脚本动态获取:
+- 为了适配自动化生成脚本生成正确的固件名，比如自动获取 1.SoC平台，2. OS平台，3.模组芯片类型，4.版本号，这四个信息的定义需要在`[device].mk`中新增四行，用于给`feasy_build.sh`脚本动态获取:
+
+```makefile
+
+# ================= Feasycom 模组 BSP 发布配置 =================
+PRODUCT_CUSTOM_CHIP := RK3568
+PRODUCT_SYSTEM_PLATFORM := A11
+PRODUCT_CHIPSET_NAME := ATBM6165
+PRODUCT_CUSTOM_VERSION := V1.1.0
+# ====================================================
+```
+
+- 为了记录执行脚本时的代码情况，对于Debug固件编译，虽然不检查当前git工作目录是否干净，但也需要记录下当前的git diff，上传镜像时应当把这个diff一同上传，与`upload_report.txt`同级目录。对于Release固件编译，必须严格当前Git工作目录是干净的，不允许有未提交的代码编译Release固件。以下是build_info.diff参考内容
+
+```bash
+BUILD_ID=$(date -u +%Y%m%d-%H%M%S)
+COMMIT=$(git rev-parse HEAD)
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+DIRTY=$(git status --porcelain | wc -l)
+
+# Include full diff + untracked files if dirty
+if [ -n "$(git status --porcelain)" ]; then
+    # Tracked file changes
+    git diff HEAD > build_info.diff
+
+    # Untracked files
+    UNTRACKED=$(git ls-files --others --exclude-standard)
+    if [ -n "$UNTRACKED" ]; then
+        echo "" >> build_info.diff
+        echo "=== UNTRACKED FILES ===" >> build_info.diff
+        echo "$UNTRACKED" >> build_info.diff
+        echo "=== CONTENTS ===" >> build_info.diff
+        echo "$UNTRACKED" | while IFS= read -r f; do
+            echo "--- $f ---" >> build_info.diff
+            cat "$f" 2>/dev/null >> build_info.diff || echo "[binary or missing]" >> build_info.diff
+            echo "" >> build_info.diff
+        done
+    fi
+fi
+```
 
 > 以下是脚本执行案例 
 
@@ -231,6 +271,7 @@ FTP/
 6. 镜像包打包
 7. 镜像包中的CHANGLOG.md应当是FTP上已有CHANGELOG.md的延伸版，也就是这个固件发布时，压缩包的CHANGELOG.md会和上一级目录中Debug类型/Release类型全局的CHANGELOG.md是同步的，并且是都是当时最新的。
 8. FTP 密码安全机制：优先从环境变量 `FTP_PASS` 读取，未设置时交互式静默输入，避免密码明文暴露
+9. 检查镜像同级目录是否有`build_info`相关文件，若有，一同上传，该文件并与upload_report.txt同级目录
 
 > 上传脚本应有以下安全机制
 

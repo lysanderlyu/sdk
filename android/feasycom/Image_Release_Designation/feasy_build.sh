@@ -32,6 +32,7 @@ VERBOSE=false
 CLEAN_BUILD=false
 SUBMODULE_UPDATE=false
 DRY_RUN=false
+IMAGE_BASENAME=""
 
 # ===================== 日志函数 =====================
 log_info() {
@@ -342,7 +343,9 @@ generate_image_name() {
         IMAGE_NAME="${chip}_${platform}_${chipset}_${MODULE_NAME}_${version}_${build_type_capital}_${BUILD_DATE}_${GIT_HASH}.img"
     fi
     
+    IMAGE_BASENAME="${IMAGE_NAME%.img}"
     log_info "镜像名: $IMAGE_NAME"
+    log_info "镜像子目录: $IMAGE_BASENAME"
     echo "$IMAGE_NAME"
 }
 
@@ -394,9 +397,9 @@ copy_image() {
         output_subdir="RELEASE"
     fi
     
-    local output_dir="${IMAGES_OUTPUT_DIR}/${output_subdir}"
+    local output_dir="${IMAGES_OUTPUT_DIR}/${output_subdir}/${IMAGE_BASENAME}"
     mkdir -p "$output_dir"
-    
+
     log_info "输出目录: $output_dir"
     
     # 查找编译生成的镜像文件
@@ -446,6 +449,71 @@ copy_image() {
     fi
 }
 
+# ===================== 生成构建记录 (build_info) =====================
+generate_build_info() {
+    log_step "生成构建记录 (build_info.txt)"
+
+    local output_subdir
+    if [[ "$BUILD_TYPE" == "debug" ]]; then
+        output_subdir="DEBUG"
+    else
+        output_subdir="RELEASE"
+    fi
+
+    local output_dir="${IMAGES_OUTPUT_DIR}/${output_subdir}/${IMAGE_BASENAME}"
+
+    cd "$SDK_ROOT_DIR"
+
+    local build_id
+    build_id=$(date -u +%Y%m%d-%H%M%S)
+    local commit
+    commit=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+    local branch
+    branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+    local dirty
+    dirty=$(git status --porcelain 2>/dev/null | wc -l)
+
+    if [[ "$DRY_RUN" == true ]]; then
+        log_info "[模拟] 生成 build_info.txt: ${output_dir}/build_info.txt"
+        return 0
+    fi
+
+    # 生成 build_info.txt
+    local build_info_file="${output_dir}/build_info.txt"
+    cat > "$build_info_file" << EOF
+BUILD_ID=${build_id}
+COMMIT=${commit}
+BRANCH=${branch}
+DIRTY=${dirty}
+EOF
+    log_info "build_info.txt 已生成: ${build_info_file}"
+
+    # 如果有未提交改动，生成 build_info.diff（含 tracked changes + untracked files）
+    if [[ "$dirty" -gt 0 ]]; then
+        local diff_file="${output_dir}/build_info.diff"
+
+        # Tracked file changes
+        git diff HEAD > "$diff_file" 2>/dev/null || true
+
+        # Untracked files（列出名称并 append 内容）
+        local untracked
+        untracked=$(git ls-files --others --exclude-standard 2>/dev/null || true)
+        if [[ -n "$untracked" ]]; then
+            echo "" >> "$diff_file"
+            echo "=== UNTRACKED FILES ===" >> "$diff_file"
+            echo "$untracked" >> "$diff_file"
+            echo "=== CONTENTS ===" >> "$diff_file"
+            while IFS= read -r f; do
+                echo "--- $f ---" >> "$diff_file"
+                cat "$f" 2>/dev/null >> "$diff_file" || echo "[binary or missing]" >> "$diff_file"
+                echo "" >> "$diff_file"
+            done <<< "$untracked"
+        fi
+
+        log_info "build_info.diff 已生成 (${dirty} 个未提交变更)"
+    fi
+}
+
 # ===================== 生成编译报告 =====================
 generate_build_report() {
     log_step "生成编译报告"
@@ -457,7 +525,7 @@ generate_build_report() {
         output_subdir="RELEASE"
     fi
     
-    local report_file="${IMAGES_OUTPUT_DIR}/${output_subdir}/build_report_${BUILD_DATE}_${BUILD_TIME}.txt"
+    local report_file="${IMAGES_OUTPUT_DIR}/${output_subdir}/${IMAGE_BASENAME}/build_report_${BUILD_DATE}_${BUILD_TIME}.txt"
     
     log_info "生成编译报告: $report_file"
     
@@ -516,11 +584,11 @@ show_summary() {
     echo ""
     echo "  模组型号:     $MODULE_NAME"
     echo "  编译类型:     $BUILD_TYPE"
-    echo "  镜像文件:     ${IMAGES_OUTPUT_DIR}/${output_subdir}/${IMAGE_NAME}"
+    echo "  镜像文件:     ${IMAGES_OUTPUT_DIR}/${output_subdir}/${IMAGE_BASENAME}/${IMAGE_NAME}"
     echo "  Git 哈希:     $GIT_HASH"
     echo ""
     echo -e "${YELLOW}  上传命令:${NC}"
-    echo "  FTP_PASS="密码" feasy_upload.sh ${IMAGES_OUTPUT_DIR}/${output_subdir}/${IMAGE_NAME}"
+    echo "  FTP_PASS="密码" feasy_upload.sh ${IMAGES_OUTPUT_DIR}/${output_subdir}/${IMAGE_BASENAME}/${IMAGE_NAME}"
     echo ""
 }
 
@@ -571,13 +639,16 @@ main() {
     # 8. 复制镜像
     copy_image
     
-    # 9. 生成编译报告
+    # 9. 生成构建记录 (build_info.txt + build_info.diff)
+    generate_build_info
+
+    # 10. 生成编译报告
     generate_build_report
     
-    # 10. 显示结果摘要
+    # 11. 显示结果摘要
     show_summary
-    
-    # 11. 计算执行时间
+
+    # 12. 计算执行时间
     local end_time
     end_time=$(date +%s)
     local duration=$((end_time - start_time))

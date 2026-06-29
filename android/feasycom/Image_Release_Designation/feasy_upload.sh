@@ -41,6 +41,7 @@ LOCAL_MODE=false
 LOCAL_TARGET_DIR=""
 RELEASE_NOTES_PATH=""
 IMG_NAME=""
+IMG_SOURCE_DIR=""
 TEMP_DIR=""
 ZIP_FILE=""
 # FTP 连接模式（自动判定：true=lftp, false=本地挂载）
@@ -1064,6 +1065,50 @@ REPORT_EOF
     rm -f "$temp_report"
 }
 
+# ===================== 上传 build_info 相关文件 =====================
+upload_build_info() {
+    local target_path="$1"
+
+    log_info "检查源目录中 build_info 相关文件..."
+
+    local found=false
+    for info_file in "build_info.txt" "build_info.diff"; do
+        local src_file="${IMG_SOURCE_DIR}/${info_file}"
+        if [[ ! -f "$src_file" ]]; then
+            log_debug "未发现 ${info_file}，跳过"
+            continue
+        fi
+
+        found=true
+        local target_file="${target_path}${info_file}"
+
+        if [[ "$DRY_RUN" == true ]]; then
+            if [[ "$FTP_USE_LFTP" == true ]]; then
+                log_info "[模拟] lftp put ${src_file} → ${target_path}"
+            else
+                log_info "[模拟] cp ${src_file} → ${target_file}"
+            fi
+            continue
+        fi
+
+        if [[ "$FTP_USE_LFTP" == true ]]; then
+            if lftp_put_remote "$src_file" "$target_path"; then
+                log_info "✅ ${info_file} 已上传到远程目录"
+            else
+                log_warn "${info_file} 远程上传失败"
+            fi
+        else
+            cp "$src_file" "$target_file"
+            chmod 644 "$target_file"
+            log_info "✅ ${info_file} 已上传: ${target_file}"
+        fi
+    done
+
+    if [[ "$found" == false ]]; then
+        log_info "未发现 build_info 相关文件，跳过"
+    fi
+}
+
 # ===================== 发布后提交（已禁用） =====================
 # 此函数不再使用 —— 上传后不自动提交 SDK 仓库的 CHANGELOG.md
 post_release_commit() {
@@ -1127,6 +1172,9 @@ main() {
         exit 1
     fi
 
+    # 4. 解析镜像文件源目录（用于查找 build_info 文件）
+    IMG_SOURCE_DIR="$(cd "$(dirname "$IMG_NAME")" && pwd 2>/dev/null || echo "$(dirname "$IMG_NAME")")"
+
     # 打印信息摘要
     echo ""
     echo "镜像信息摘要:"
@@ -1138,27 +1186,27 @@ main() {
     [[ -n "${TIME:-}" ]] && echo "  - 时间:      ${TIME}"
     echo ""
 
-    # 4. 生成目标路径
+    # 5. 生成目标路径
     local target_path
     target_path=$(generate_target_path)
     log_info "目标路径: $target_path"
 
-    # 5. 路径安全检查
+    # 6. 路径安全检查
     if ! check_path_security "$target_path"; then
         log_error "路径安全检查失败"
         exit 1
     fi
 
-    # 6. 镜像版本冲突检查（仅 Release）
+    # 7. 镜像版本冲突检查（仅 Release）
     check_version_conflict "$target_path"
 
-    # 7. 检测 FEASY_FORCE_SKIP 环境变量（CI 自动化逃生通道）
+    # 8. 检测 FEASY_FORCE_SKIP 环境变量（CI 自动化逃生通道）
     if [[ "${FEASY_FORCE_SKIP:-}" == "1" && "$SKIP_CHANGELOG" == false && -z "$RELEASE_NOTES_PATH" ]]; then
         log_info "检测到环境变量 FEASY_FORCE_SKIP=1，自动进入 --skip-changelog 模式"
         SKIP_CHANGELOG=true
     fi
 
-    # 8. 生成/检查 CHANGELOG 模板
+    # 9. 生成/检查 CHANGELOG 模板
     if [[ "$SKIP_CHANGELOG" == true ]]; then
         log_info "已跳过 CHANGELOG 审核流程 (--skip-changelog)"
         log_info "将为 .zip 包生成默认 CHANGELOG.md"
@@ -1168,20 +1216,20 @@ main() {
         generate_changelog_template
     fi
 
-    # 9. 打包镜像 (.img + CHANGELOG.md → .zip，CHANGELOG 与全局历史合并)
+    # 10. 打包镜像 (.img + CHANGELOG.md → .zip，CHANGELOG 与全局历史合并)
     if ! package_image "$target_path"; then
         log_error "打包失败"
         exit 1
     fi
 
-    # 10. 检查目标文件是否已存在
+    # 11. 检查目标文件是否已存在
     local zip_basename
     zip_basename=$(basename "$ZIP_FILE")
     if ! check_file_exists "$target_path" "$zip_basename"; then
         exit 1
     fi
 
-    # 11. 创建目标目录（目录已存在则跳过）
+    # 12. 创建目标目录（目录已存在则跳过）
     if [[ "$DRY_RUN" == true ]]; then
         if [[ "$FTP_USE_LFTP" == true ]]; then
             log_info "[模拟] lftp mkdir -p ${target_path}"
@@ -1210,19 +1258,22 @@ main() {
         fi
     fi
 
-    # 12. 上传 .zip
+    # 13. 上传 .zip
     if ! upload_file "$target_path"; then
         log_error "文件上传失败"
         exit 1
     fi
 
-    # 13. 更新全局 CHANGELOG.md（FTP 目录）
+    # 14. 更新全局 CHANGELOG.md（FTP 目录）
     update_global_changelog "$target_path"
 
-    # 14. 生成上传报告
+    # 15. 生成上传报告
     generate_upload_report "$target_path"
 
-    # 15. 计算耗时并输出摘要
+    # 16. 上传 build_info 相关文件（build_info.txt / build_info.diff）
+    upload_build_info "$target_path"
+
+    # 17. 计算耗时并输出摘要
     local end_time
     end_time=$(date +%s)
     local duration=$((end_time - start_time))
