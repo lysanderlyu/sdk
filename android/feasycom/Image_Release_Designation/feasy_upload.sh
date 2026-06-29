@@ -366,6 +366,36 @@ generate_target_path() {
     fi
 }
 
+# ===================== 目标路径确认 =====================
+confirm_target_path() {
+    local target_path="$1"
+
+    log_step "目标路径确认"
+
+    echo ""
+    echo -e "  目标路径: ${CYAN}${target_path}${NC}"
+    echo ""
+
+    # -y 模式自动跳过
+    if [[ "$YES" == true ]]; then
+        log_info "已指定 -y 选项，跳过目标路径确认"
+        return 0
+    fi
+
+    if [[ ! -t 0 ]]; then
+        log_info "非交互模式，跳过目标路径确认"
+        return 0
+    fi
+
+    echo -e -n "以上目标路径是否正确？(Y/n): "
+    read -r confirm
+    if [[ "$confirm" == "n" || "$confirm" == "N" ]]; then
+        log_error "用户取消操作"
+        exit 0
+    fi
+    log_info "目标路径确认通过"
+}
+
 # ===================== 路径安全检查 =====================
 check_path_security() {
     local target_path="$1"
@@ -1220,20 +1250,23 @@ main() {
         generate_changelog_template
     fi
 
-    # 10. 打包镜像 (.img + CHANGELOG.md → .zip，CHANGELOG 与全局历史合并)
+    # 10. 目标路径确认
+    confirm_target_path "$target_path"
+
+    # 11. 打包镜像 (.img + CHANGELOG.md → .zip，CHANGELOG 与全局历史合并)
     if ! package_image "$target_path"; then
         log_error "打包失败"
         exit 1
     fi
 
-    # 11. 检查目标文件是否已存在
+    # 12. 检查目标文件是否已存在
     local zip_basename
     zip_basename=$(basename "$ZIP_FILE")
     if ! check_file_exists "$target_path" "$zip_basename"; then
         exit 1
     fi
 
-    # 12. 创建目标目录（目录已存在则跳过）
+    # 13. 创建目标目录（目录已存在则跳过）
     if [[ "$DRY_RUN" == true ]]; then
         if [[ "$FTP_USE_LFTP" == true ]]; then
             log_info "[模拟] lftp mkdir -p ${target_path}"
@@ -1262,22 +1295,22 @@ main() {
         fi
     fi
 
-    # 13. 上传 .zip
+    # 14. 上传 .zip
     if ! upload_file "$target_path"; then
         log_error "文件上传失败"
         exit 1
     fi
 
-    # 14. 更新全局 CHANGELOG.md（FTP 目录）
+    # 15. 更新全局 CHANGELOG.md（FTP 目录）
     update_global_changelog "$target_path"
 
-    # 15. 生成上传报告
+    # 16. 生成上传报告
     generate_upload_report "$target_path"
 
-    # 16. 上传 build_info 相关文件（build_info.txt / build_info.diff）
+    # 17. 上传 build_info 相关文件（build_info.txt / build_info.diff）
     upload_build_info "$target_path"
 
-    # 17. 计算耗时并输出摘要
+    # 18. 计算耗时并输出摘要
     local end_time
     end_time=$(date +%s)
     local duration=$((end_time - start_time))

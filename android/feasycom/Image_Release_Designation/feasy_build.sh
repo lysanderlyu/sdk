@@ -300,6 +300,33 @@ get_version_info() {
     log_info "版本号: $PRODUCT_CUSTOM_VERSION"
 }
 
+# ===================== 编译前配置确认 =====================
+confirm_config() {
+    log_step "编译配置确认"
+
+    echo ""
+    echo -e "  模组型号:         ${CYAN}${MODULE_NAME}${NC}"
+    echo -e "  编译类型:         ${CYAN}${BUILD_TYPE}${NC}"
+    echo -e "  项目主控_芯片组:  ${CYAN}${PRODUCT_CUSTOM_CHIP}${NC}"
+    echo -e "  系统平台:         ${CYAN}${PRODUCT_SYSTEM_PLATFORM}${NC}"
+    echo -e "  模组芯片:         ${CYAN}${PRODUCT_CHIPSET_NAME}${NC}"
+    echo -e "  版本号:           ${CYAN}${PRODUCT_CUSTOM_VERSION}${NC}"
+    echo ""
+
+    if [[ ! -t 0 ]]; then
+        log_info "非交互模式，跳过配置确认"
+        return 0
+    fi
+
+    echo -e -n "以上信息是否正确？(Y/n): "
+    read -r confirm
+    if [[ "$confirm" == "n" || "$confirm" == "N" ]]; then
+        log_error "配置信息不正确，请检查 device/rockchip/rk356x/${MODULE_NAME}/${MODULE_NAME}.mk 中的配置后重试"
+        exit 1
+    fi
+    log_info "配置确认通过"
+}
+
 # ===================== 更新 Submodules =====================
 update_submodules() {
     if [[ "$SUBMODULE_UPDATE" == false ]]; then
@@ -689,32 +716,35 @@ main() {
     
     # 3. 获取版本信息
     get_version_info
-    
-    # 4. 更新 Submodules
+
+    # 4. 编译前配置确认
+    confirm_config
+
+    # 5. 更新 Submodules
     update_submodules
-    
-    # 5. 编译前准备
+
+    # 6. 编译前准备
     prepare_build
-    
-    # 6. 生成镜像名
+
+    # 7. 生成镜像名
     generate_image_name
-    
-    # 7. 执行编译
+
+    # 8. 执行编译
     run_build
-    
-    # 8. 复制镜像
+
+    # 9. 复制镜像
     copy_image
-    
-    # 9. 生成构建记录 (build_info.txt + build_info.diff)
+
+    # 10. 生成构建记录 (build_info.txt + build_info.diff)
     generate_build_info
 
-    # 10. 生成编译报告
+    # 11. 生成编译报告
     generate_build_report
-    
-    # 11. 显示结果摘要
+
+    # 12. 显示结果摘要
     show_summary
 
-    # 12. 计算执行时间
+    # 13. 计算执行时间
     local end_time
     end_time=$(date +%s)
     local duration=$((end_time - start_time))

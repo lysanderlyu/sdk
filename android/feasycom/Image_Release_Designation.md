@@ -185,7 +185,7 @@ FTP/
 | `feasy_build.sh -m BW8205 -c -u` | 先 clean 再更新 submodules 后编译 | 清理构建产物后拉取最新submodules再执行编译流程 |
 | `feasy_build.sh -m BW8205 -d -v` | Debug编译 + 详细输出模式 | 编译过程中输出更多调试信息，便于排查编译问题 |
 
-- 为了适配自动化生成脚本生成正确的固件名，比如自动获取 1.SoC平台，2. OS平台，3.模组芯片类型，4.版本号，这四个信息的定义需要在`[device].mk`中新增四行，用于给`feasy_build.sh`脚本动态获取:
+- 为了适配自动化生成脚本生成正确的固件名，比如自动获取 1.SoC平台，2. OS平台，3.模组芯片类型，4.版本号，这四个信息的定义需要在`[device].mk`中新增四行，用于给`feasy_build.sh`脚本动态获取，并在编译前让开发者确认信息是否正确:
 
 ```makefile
 
@@ -273,6 +273,7 @@ fi
 7. 镜像包中的CHANGLOG.md应当是FTP上已有CHANGELOG.md的延伸版，也就是这个固件发布时，压缩包的CHANGELOG.md会和上一级目录中Debug类型/Release类型全局的CHANGELOG.md是同步的，并且是都是当时最新的。
 8. FTP 密码安全机制：优先从环境变量 `FTP_PASS` 读取，未设置时交互式静默输入，避免密码明文暴露
 9. 检查镜像同级目录是否有`build_info`相关文件，若有，一同上传，该文件并与upload_report.txt同级目录
+10. 打包镜像前提示目标路径让开发者确认信息是否正确
 
 > 上传脚本应有以下安全机制
 
