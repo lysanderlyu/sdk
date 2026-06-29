@@ -92,6 +92,7 @@ usage() {
     Release发行版命名: [项目主控_芯片组]_[系统平台]_[模组芯片]_[模组型号]_[版本号]_Release_[年月日]_[Git哈希].img
 
     编译前需要在 device/rockchip/rk356x/<模组型号>/<模组型号>.mk 中配置以下变量:
+        PRODUCT_CUSTOM_CHIP := RK3568
         PRODUCT_SYSTEM_PLATFORM := A11
         PRODUCT_CHIPSET_NAME := ATBM6165
         PRODUCT_CUSTOM_VERSION := V1.0.0
@@ -201,21 +202,46 @@ check_environment() {
 
 # ===================== Git 状态检查 =====================
 check_git_status() {
-    log_info "检查 Git 仓库状态..."
-    
+    log_info "检查 Git 仓库状态（含子仓库）..."
+
     cd "$SDK_ROOT_DIR"
-    
-    # 检查是否有未提交的修改
+
+    local has_dirty=false
+
+    # 检查 superproject 是否有未提交的修改
     if ! git diff --quiet HEAD; then
         log_error "存在未提交的修改！Release 模式禁止使用未提交的代码编译固件"
         log_error "请先提交或暂存所有修改后再编译 Release 版本"
         echo ""
         echo "未提交的文件:"
         git status --short
+        has_dirty=true
+    fi
+
+    # 检查 submodules 是否有未提交的修改
+    local submodules
+    submodules=$(git config --file .gitmodules --get-regexp path 2>/dev/null | awk '{print $2}' || true)
+    if [[ -n "$submodules" ]]; then
+        while IFS= read -r sub_path; do
+            if [[ -d "$sub_path" ]]; then
+                if ! git -C "$sub_path" diff --quiet HEAD 2>/dev/null; then
+                    log_error "子仓库 ${sub_path} 存在未提交的修改！"
+                    has_dirty=true
+                fi
+                local sub_untracked
+                sub_untracked=$(git -C "$sub_path" ls-files --others --exclude-standard 2>/dev/null)
+                if [[ -n "$sub_untracked" ]]; then
+                    log_warn "子仓库 ${sub_path} 存在未跟踪的文件"
+                fi
+            fi
+        done <<< "$submodules"
+    fi
+
+    if [[ "$has_dirty" == true ]]; then
         exit 1
     fi
-    
-    # 检查是否有未跟踪的文件
+
+    # 检查是否有未跟踪的文件（superproject）
     local untracked_files
     untracked_files=$(git ls-files --others --exclude-standard)
     if [[ -n "$untracked_files" ]]; then
@@ -224,8 +250,8 @@ check_git_status() {
             echo "$untracked_files"
         fi
     fi
-    
-    log_info "Git 仓库状态检查通过"
+
+    log_info "Git 仓库状态检查通过（含子仓库）"
 }
 
 # ===================== MK 配置读取辅助函数 =====================
@@ -486,10 +512,34 @@ COMMIT=${commit}
 BRANCH=${branch}
 DIRTY=${dirty}
 EOF
+
+    # 记录所有子仓库状态（submodules），同时累计子仓库改动计数
+    local submodules sub_dirty_total=0
+    submodules=$(git config --file .gitmodules --get-regexp path 2>/dev/null | awk '{print $2}' || true)
+    if [[ -n "$submodules" ]]; then
+        echo "" >> "$build_info_file"
+        echo "# SUBMODULES" >> "$build_info_file"
+        while IFS= read -r sub_path; do
+            if [[ -d "$sub_path" ]]; then
+                local sub_commit sub_branch sub_dirty
+                sub_commit=$(git -C "$sub_path" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+                sub_branch=$(git -C "$sub_path" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+                sub_dirty=$(git -C "$sub_path" status --porcelain 2>/dev/null | wc -l)
+                sub_dirty_total=$((sub_dirty_total + sub_dirty))
+                echo "" >> "$build_info_file"
+                echo "[${sub_path}]" >> "$build_info_file"
+                echo "COMMIT=${sub_commit}" >> "$build_info_file"
+                echo "BRANCH=${sub_branch}" >> "$build_info_file"
+                echo "DIRTY=${sub_dirty}" >> "$build_info_file"
+            fi
+        done <<< "$submodules"
+    fi
+
     log_info "build_info.txt 已生成: ${build_info_file}"
 
-    # 如果有未提交改动，生成 build_info.diff（含 tracked changes + untracked files）
-    if [[ "$dirty" -gt 0 ]]; then
+    # 如果有未提交改动（主仓库或子仓库），生成 build_info.diff（含 tracked changes + untracked files）
+    # 子仓库的 diff 用独立的 build_info_submodule_<name>.diff 文件区分
+    if [[ "$dirty" -gt 0 || "$sub_dirty_total" -gt 0 ]]; then
         local diff_file="${output_dir}/build_info.diff"
 
         # Tracked file changes
@@ -511,6 +561,22 @@ EOF
         fi
 
         log_info "build_info.diff 已生成 (${dirty} 个未提交变更)"
+
+        # 子仓库 diff 用独立的文件区分
+        if [[ -n "$submodules" ]]; then
+            while IFS= read -r sub_path; do
+                if [[ -d "$sub_path" ]]; then
+                    local sub_dirty
+                    sub_dirty=$(git -C "$sub_path" status --porcelain 2>/dev/null | wc -l)
+                    if [[ "$sub_dirty" -gt 0 ]]; then
+                        local sub_diff_name="build_info_submodule_${sub_path//\//_}.diff"
+                        local sub_diff_file="${output_dir}/${sub_diff_name}"
+                        git -C "$sub_path" diff HEAD > "$sub_diff_file" 2>/dev/null || true
+                        log_info "${sub_diff_name} 已生成 (${sub_path}, ${sub_dirty} 个未提交变更)"
+                    fi
+                fi
+            done <<< "$submodules"
+        fi
     fi
 }
 
@@ -588,7 +654,7 @@ show_summary() {
     echo "  Git 哈希:     $GIT_HASH"
     echo ""
     echo -e "${YELLOW}  上传命令:${NC}"
-    echo "  FTP_PASS="密码" feasy_upload.sh ${IMAGES_OUTPUT_DIR}/${output_subdir}/${IMAGE_BASENAME}/${IMAGE_NAME}"
+    echo "  FTP_PASS="密码" ./feasy_upload.sh ${IMAGES_OUTPUT_DIR}/${output_subdir}/${IMAGE_BASENAME}/${IMAGE_NAME}"
     echo ""
 }
 

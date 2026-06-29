@@ -1071,15 +1071,23 @@ upload_build_info() {
 
     log_info "检查源目录中 build_info 相关文件..."
 
-    local found=false
-    for info_file in "build_info.txt" "build_info.diff"; do
+    # 自动发现所有 build_info* 文件（含子仓库独立 diff 文件 build_info_submodule_*.diff）
+    local info_files=()
+    while IFS= read -r -d '' f; do
+        info_files+=("$(basename "$f")")
+    done < <(find "${IMG_SOURCE_DIR}" -maxdepth 1 -type f -name "build_info*" -print0 2>/dev/null)
+
+    if [[ ${#info_files[@]} -eq 0 ]]; then
+        log_info "未发现 build_info 相关文件，跳过"
+        return 0
+    fi
+
+    for info_file in "${info_files[@]}"; do
         local src_file="${IMG_SOURCE_DIR}/${info_file}"
         if [[ ! -f "$src_file" ]]; then
-            log_debug "未发现 ${info_file}，跳过"
             continue
         fi
 
-        found=true
         local target_file="${target_path}${info_file}"
 
         if [[ "$DRY_RUN" == true ]]; then
@@ -1103,10 +1111,6 @@ upload_build_info() {
             log_info "✅ ${info_file} 已上传: ${target_file}"
         fi
     done
-
-    if [[ "$found" == false ]]; then
-        log_info "未发现 build_info 相关文件，跳过"
-    fi
 }
 
 # ===================== 发布后提交（已禁用） =====================

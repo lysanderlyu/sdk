@@ -167,6 +167,7 @@ FTP/
 - 应有`feasy_build.sh`自动化脚本生成固件，为了方便和RK平台兼容性，`feasy_build.sh`构建脚本沿用RK官方`build.sh`编译打包镜像操作，`feasy_build.sh`脚本只用于快速发布固件，避免人为编译发行版时生成了有本地修改但未提交git记录的源码生成的固件
 - 应有`feasy_upload.sh`自动化脚本上传固件，并由专门的测试人员负责上传动作
 - 对于编译固件，应有一个`build_info.txt`文件记录固件构建情况。
+- 对子仓库也有检查，并且相应的会在`build_info.txt`中记录不同子库的状态。
 
 
 ## 方案
@@ -196,7 +197,7 @@ PRODUCT_CUSTOM_VERSION := V1.1.0
 # ====================================================
 ```
 
-- 为了记录执行脚本时的代码情况，对于Debug固件编译，虽然不检查当前git工作目录是否干净，但也需要记录下当前的git diff，上传镜像时应当把这个diff一同上传，与`upload_report.txt`同级目录。对于Release固件编译，必须严格当前Git工作目录是干净的，不允许有未提交的代码编译Release固件。以下是build_info.diff参考内容
+- 为了记录执行脚本时的代码情况，对于Debug固件编译，虽然不检查当前git工作目录是否干净，但也需要记录下当前的git diff，上传镜像时应当把这个diff一同上传，与`upload_report.txt`同级目录。对于Release固件编译，必须严格当前Git工作目录是干净的，不允许有未提交的代码编译Release固件。以下是build_info.diff参考内容，注意，子仓库的diff应该用独立的diff文件区分。
 
 ```bash
 BUILD_ID=$(date -u +%Y%m%d-%H%M%S)
