@@ -754,11 +754,11 @@ generate_changelog_template() {
 
 TEMPLATE_EOF
 
-    # 追加提交历史参考（如果可用）
+    # 追加 Git Commit History（如果可用）
     if git log --oneline -10 &>/dev/null; then
         {
             echo ""
-            echo "### 参考提交记录"
+            echo "### Git Commit History"
             echo ""
             git log --oneline -10 --pretty=format:"- %h %s"
             echo ""
@@ -833,7 +833,7 @@ CHG_EOF
 }
 
 # ===================== CHANGELOG 提取函数 =====================
-# 从 CHANGELOG_TEMP.md 中提取当前版本的条目（去掉标记和参考提交）
+# 从 CHANGELOG_TEMP.md 中提取当前版本的条目（去掉 CHECKED 标记和提示说明）
 extract_current_version_entry() {
     local source_file="$1"
 
@@ -842,12 +842,11 @@ extract_current_version_entry() {
         return
     fi
 
-    # 移除 CHECKED 标记行、警告说明行、参考提交区，然后压缩多余空行
+    # 移除 CHECKED 标记行、警告说明行，然后压缩多余空行
     sed -e '/^CHECKED:/d' \
         -e '/^> ⚠️/d' \
         -e '/^> 编辑完成后/d' \
         -e '/^> $/d' \
-        -e '/^### 参考提交记录/d' \
         -e '/^---$/d' \
         "$source_file" \
         | sed -e '/^[[:space:]]*$/{N;/^\n$/d;}' \
