@@ -203,6 +203,13 @@ PRODUCT_CUSTOM_VERSION := V1.1.0
 # ====================================================
 ```
 
+对于以上值，有以下规范：
+
+1. `PRODUCT_CUSTOM_CHIP`的值只能由**英文和数字**组成，并且必须英文起始，不区分大小写，e.g. RK3568, RK3588, MTK8391
+2. `PRODUCT_SYSTEM_PLATFORM`的值只能**英文和数字**组成，并且必须英文起始，不区分大小写，e.g. A11 (Android 11), U2204 (Ubuntu 2204), D12 (Debian 12), Yocto
+3. `PRODUCT_CHIPSET_NAME`的值只能**英文和数字或至多一个下划线**组成，并且必须英文起始，不区分大小写，e.g. ATBM6165, RTL8821CS, MT7921
+4. `PRODUCT_CUSTOM_VERSION`的值只能形如"**Vx.x.x**"，其中x必须是数字，并且数字允许多位十进制数，不区分大小写 e.g. V1.0.0, V1.10.0
+
 - 为了记录执行脚本时的代码情况，对于Debug固件编译，虽然不检查当前git工作目录是否干净，但也需要记录下当前的git diff，上传镜像时应当把这个diff一同上传，与`upload_report.txt`同级目录。对于Release固件编译，必须严格当前Git工作目录是干净的，不允许有未提交的代码编译Release固件。以下是build_info.diff参考内容，注意，子仓库的diff应该用独立的diff文件区分。
 
 ```bash

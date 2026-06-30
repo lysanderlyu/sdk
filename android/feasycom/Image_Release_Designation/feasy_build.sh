@@ -97,6 +97,12 @@ usage() {
         PRODUCT_CHIPSET_NAME := ATBM6165
         PRODUCT_CUSTOM_VERSION := V1.0.0
 
+    以上四个字段必须符合以下规范（脚本会自动校验）:
+        1. PRODUCT_CUSTOM_CHIP      — 英文和数字组成，必须英文起始，不区分大小写，e.g. RK3568, RK3588, MTK8391
+        2. PRODUCT_SYSTEM_PLATFORM  — 英文和数字组成，必须英文起始，不区分大小写，e.g. A11, U2204, D12, Yocto
+        3. PRODUCT_CHIPSET_NAME     — 英文和数字或至多一个下划线，必须英文起始，不区分大小写，e.g. ATBM6165, RTL8821CS, MT7921
+        4. PRODUCT_CUSTOM_VERSION   — 形如 "Vx.x.x"，x 为数字（允许多位十进制），不区分大小写，e.g. V1.0.0, V1.10.0
+
     设备配置文件路径规则: device/rockchip/rk356x/<模组型号>/<模组型号>.mk
     例如: -m BW8205 则配置文件为 device/rockchip/rk356x/BW8205/BW8205.mk
 EOF
@@ -266,6 +272,70 @@ check_git_status() {
     fi
 
     log_info "Git 仓库状态检查通过（含子仓库）"
+}
+
+# ===================== MK 配置校验 =====================
+# 校验从设备配置文件中读取的四个字段是否符合文档规范
+validate_mk_meta() {
+    log_step "校验 MK 配置字段"
+
+    local has_error=false
+
+    # 1. PRODUCT_CUSTOM_CHIP: 英文和数字组成，必须英文起始，不区分大小写
+    if [[ ! "$PRODUCT_CUSTOM_CHIP" =~ ^[A-Za-z][A-Za-z0-9]*$ ]]; then
+        log_error "PRODUCT_CUSTOM_CHIP 格式错误: '${PRODUCT_CUSTOM_CHIP}'"
+        log_error "  规范要求: 只能由英文和数字组成，必须英文起始，不区分大小写"
+        log_error "  正确示例: RK3568, RK3588, MTK8391"
+        has_error=true
+    else
+        log_info "PRODUCT_CUSTOM_CHIP: ${PRODUCT_CUSTOM_CHIP} ✓"
+    fi
+
+    # 2. PRODUCT_SYSTEM_PLATFORM: 英文和数字组成，必须英文起始，不区分大小写
+    if [[ ! "$PRODUCT_SYSTEM_PLATFORM" =~ ^[A-Za-z][A-Za-z0-9]*$ ]]; then
+        log_error "PRODUCT_SYSTEM_PLATFORM 格式错误: '${PRODUCT_SYSTEM_PLATFORM}'"
+        log_error "  规范要求: 只能由英文和数字组成，必须英文起始，不区分大小写"
+        log_error "  正确示例: A11, U2204, D12, Yocto"
+        has_error=true
+    else
+        log_info "PRODUCT_SYSTEM_PLATFORM: ${PRODUCT_SYSTEM_PLATFORM} ✓"
+    fi
+
+    # 3. PRODUCT_CHIPSET_NAME: 英文和数字或至多一个下划线，必须英文起始，不区分大小写
+    if [[ ! "$PRODUCT_CHIPSET_NAME" =~ ^[A-Za-z][A-Za-z0-9]*(_[A-Za-z0-9]+)?$ ]]; then
+        log_error "PRODUCT_CHIPSET_NAME 格式错误: '${PRODUCT_CHIPSET_NAME}'"
+        log_error "  规范要求: 只能由英文和数字或至多一个下划线组成，必须英文起始，不区分大小写"
+        log_error "  正确示例: ATBM6165, RTL8821CS, MT7921"
+        has_error=true
+    else
+        log_info "PRODUCT_CHIPSET_NAME: ${PRODUCT_CHIPSET_NAME} ✓"
+    fi
+
+    # 4. PRODUCT_CUSTOM_VERSION: 形如 "Vx.x.x"，x 为数字（允许多位十进制），不区分大小写
+    if [[ ! "$PRODUCT_CUSTOM_VERSION" =~ ^[Vv][0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        log_error "PRODUCT_CUSTOM_VERSION 格式错误: '${PRODUCT_CUSTOM_VERSION}'"
+        log_error "  规范要求: 只能形如 \"Vx.x.x\"，x 必须是数字，允许多位十进制，不区分大小写"
+        log_error "  正确示例: V1.0.0, V1.10.0"
+        has_error=true
+    else
+        log_info "PRODUCT_CUSTOM_VERSION: ${PRODUCT_CUSTOM_VERSION} ✓"
+    fi
+
+    if [[ "$has_error" == true ]]; then
+        local device_mk_path="${SDK_ROOT_DIR}/${DEVICE_BASE_PATH}/${MODULE_NAME}/${MODULE_NAME}.mk"
+        log_error ""
+        log_error "请在 ${device_mk_path} 中修正上述配置错误后重试"
+        exit 1
+    fi
+
+    log_info "MK 配置字段校验全部通过"
+
+    # 全部转大写，后续流程统一使用大写值
+    PRODUCT_CUSTOM_CHIP="${PRODUCT_CUSTOM_CHIP^^}"
+    PRODUCT_SYSTEM_PLATFORM="${PRODUCT_SYSTEM_PLATFORM^^}"
+    PRODUCT_CHIPSET_NAME="${PRODUCT_CHIPSET_NAME^^}"
+    PRODUCT_CUSTOM_VERSION="${PRODUCT_CUSTOM_VERSION^^}"
+    log_info "配置字段已统一转为大写"
 }
 
 # ===================== MK 配置读取辅助函数 =====================
@@ -732,34 +802,37 @@ main() {
     # 3. 获取版本信息
     get_version_info
 
-    # 4. 编译前配置确认
+    # 4. 校验 MK 配置字段
+    validate_mk_meta
+
+    # 5. 编译前配置确认
     confirm_config
 
-    # 5. 更新 Submodules
+    # 6. 更新 Submodules
     update_submodules
 
-    # 6. 编译前准备
+    # 7. 编译前准备
     prepare_build
 
-    # 7. 生成镜像名
+    # 8. 生成镜像名
     generate_image_name
 
-    # 8. 执行编译
+    # 9. 执行编译
     run_build
 
-    # 9. 复制镜像
+    # 10. 复制镜像
     copy_image
 
-    # 10. 生成构建记录 (build_info.txt + build_info.diff)
+    # 11. 生成构建记录 (build_info.txt + build_info.diff)
     generate_build_info
 
-    # 11. 生成编译报告
+    # 12. 生成编译报告
     generate_build_report
 
-    # 12. 显示结果摘要
+    # 13. 显示结果摘要
     show_summary
 
-    # 13. 计算执行时间
+    # 14. 计算执行时间
     local end_time
     end_time=$(date +%s)
     local duration=$((end_time - start_time))
