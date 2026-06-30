@@ -299,18 +299,79 @@ parse_image_name() {
     local name_without_ext="${basename_img%.img}"
 
     # 合法性检查：下划线分隔字段，包含 Debug/Release，以 .img 结尾
-    if ! echo "$basename_img" | grep -qE '^[^_]+_[^_]+_[^_]+_[^_]+_[^_]+_(Debug|Release)_[0-9]{8}.*\.img$'; then
+    # 注意：模组型号可以是单字段（BW8205）或双字段（BW8205_V2），使用动态方式定位
+    if ! echo "$basename_img" | grep -qE '^[^_]+_[^_]+_[^_]+_.*_(Debug|Release)_.+\.img$'; then
         log_error "镜像名格式不正确！当前为：${basename_img}"
+        log_error "正确格式: [主控_芯片组]_[系统平台]_[模组芯片]_[模组型号]_[版本号]_Debug/Release_[日期].img"
+        log_error "注意: 模组型号支持单字段（BW8205）或下划线分隔双字段（BW8205_V2）"
+        return 1
+    fi
+
+    # ===== 动态字段解析 =====
+    # 将镜像名按 _ 拆分为数组，通过定位版本号（V*.*.*）和类型（Debug/Release）
+    # 来确定模组型号的范围（字段索引 3 到 version_idx-1）
+    IFS='_' read -ra FIELDS <<< "$name_without_ext"
+    local field_count=${#FIELDS[@]}
+
+    # 最少需要 7 个字段: SoC + OS + Chipset + Model(≥1) + Version + Type + DateTime(≥1)
+    if [[ $field_count -lt 7 ]]; then
+        log_error "镜像名字段数不足 (${field_count})，无法解析"
         log_error "正确格式: [主控_芯片组]_[系统平台]_[模组芯片]_[模组型号]_[版本号]_Debug/Release_[日期].img"
         return 1
     fi
 
-    SOC_PLATFORM=$(echo "$name_without_ext" | cut -d'_' -f1)
-    OS_VER=$(echo "$name_without_ext" | cut -d'_' -f2)
-    CHIPSET=$(echo "$name_without_ext" | cut -d'_' -f3)
-    MODULE_MODEL=$(echo "$name_without_ext" | cut -d'_' -f4)
-    VERSION=$(echo "$name_without_ext" | cut -d'_' -f5)
-    BUILD_TYPE=$(echo "$name_without_ext" | cut -d'_' -f6)
+    # 前 3 个字段位置固定：主控芯片、系统平台、模组芯片
+    SOC_PLATFORM="${FIELDS[0]}"
+    OS_VER="${FIELDS[1]}"
+    CHIPSET="${FIELDS[2]}"
+
+    # 从第 4 个字段开始扫描，查找版本号和类型字段
+    local version_idx=-1
+    local type_idx=-1
+    local i
+    for ((i=3; i<field_count; i++)); do
+        local f="${FIELDS[$i]}"
+        # 版本号格式: V 开头 + 数字.数字.数字（如 V1.0.0）
+        if [[ "$f" =~ ^V[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            version_idx=$i
+        fi
+        # 类型字段: Debug 或 Release
+        if [[ "$f" == "Debug" || "$f" == "Release" ]]; then
+            type_idx=$i
+        fi
+    done
+
+    # 校验版本号
+    if [[ $version_idx -eq -1 ]]; then
+        log_error "镜像名中未找到版本号字段（格式如 V1.0.0）"
+        return 1
+    fi
+
+    # 校验类型字段
+    if [[ $type_idx -eq -1 ]]; then
+        log_error "镜像名中未找到版本类型字段（Debug/Release）"
+        return 1
+    fi
+
+    # 类型必须在版本号之后且紧邻
+    if [[ $type_idx -ne $((version_idx + 1)) ]]; then
+        log_error "版本号和类型字段顺序不正确"
+        return 1
+    fi
+
+    # 模组型号 = 字段索引 3 到 (version_idx - 1) 之间所有字段用 _ 拼接
+    local module_parts=()
+    for ((i=3; i<version_idx; i++)); do
+        module_parts+=("${FIELDS[$i]}")
+    done
+    if [[ ${#module_parts[@]} -eq 0 ]]; then
+        log_error "模组型号字段为空，镜像名格式不正确"
+        return 1
+    fi
+    MODULE_MODEL=$(IFS='_'; echo "${module_parts[*]}")
+
+    VERSION="${FIELDS[$version_idx]}"
+    BUILD_TYPE="${FIELDS[$type_idx]}"
 
     if [[ "$BUILD_TYPE" != "Debug" && "$BUILD_TYPE" != "Release" ]]; then
         log_error "版本类型不合法: ${BUILD_TYPE} (应为 Debug 或 Release)"
@@ -318,16 +379,19 @@ parse_image_name() {
     fi
 
     if [[ "$BUILD_TYPE" == "Debug" ]]; then
-        # Debug: ..._Debug_[年月日].[时分].img
-        DATE_TIME=$(echo "$name_without_ext" | cut -d'_' -f7-)
-        DATE_TIME="${DATE_TIME//./_}"
+        # Debug: ..._Debug_[年月日.时分].img — 日期时间在最后一个字段
+        local last_idx=$((field_count - 1))
+        local date_time_field="${FIELDS[$last_idx]}"
+        DATE_TIME="${date_time_field//./_}"
         DATE=$(echo "$DATE_TIME" | cut -d'_' -f1)
         TIME=$(echo "$DATE_TIME" | cut -d'_' -f2)
         FOLDER_DATE="${DATE}_${TIME}"
     else
-        # Release: ..._Release_[年月日]_[Git哈希].img
-        DATE=$(echo "$name_without_ext" | cut -d'_' -f7)
-        GIT_HASH=$(echo "$name_without_ext" | cut -d'_' -f8-)
+        # Release: ..._Release_[年月日]_[Git哈希].img — 日期和哈希分开
+        local date_idx=$((type_idx + 1))
+        local hash_idx=$((type_idx + 2))
+        DATE="${FIELDS[$date_idx]}"
+        GIT_HASH="${FIELDS[$hash_idx]}"
         FOLDER_DATE="${DATE}_${GIT_HASH}"
     fi
 
