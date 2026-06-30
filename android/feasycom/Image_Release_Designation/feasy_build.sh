@@ -119,7 +119,7 @@ parse_args() {
                     log_error "选项 $1 需要一个参数"
                     exit 1
                 fi
-                MODULE_NAME="$(echo "$2" | tr '[:lower:]' '[:upper:]')"
+                MODULE_NAME="$2"
                 shift 2
                 ;;
             -d|--debug)
@@ -175,12 +175,26 @@ check_environment() {
     fi
     log_info "build.sh 存在"
     
-    # 3. 检查设备配置文件是否存在
-    local device_mk_path="${SDK_ROOT_DIR}/${DEVICE_BASE_PATH}/${MODULE_NAME}/${MODULE_NAME}.mk"
-    if [[ ! -f "$device_mk_path" ]]; then
-        log_error "未找到设备配置文件: $device_mk_path"
-        log_error "请确认模组型号 '$MODULE_NAME' 是否正确，或创建对应的配置文件"
+    # 3. 检查设备配置文件是否存在（大小写不敏感）
+    local device_mk_path
+    device_mk_path=$(find "${SDK_ROOT_DIR}/${DEVICE_BASE_PATH}" -maxdepth 2 -type f -iname "${MODULE_NAME}.mk" 2>/dev/null | head -1)
+    if [[ -z "$device_mk_path" ]]; then
+        log_error "未找到模组 '${MODULE_NAME}' 的设备配置文件"
+        log_error "搜索路径: ${SDK_ROOT_DIR}/${DEVICE_BASE_PATH}/**/${MODULE_NAME}.mk（大小写不敏感）"
+        log_error "请确认模组型号是否正确，或创建对应的配置文件"
+        log_error ""
+        log_error "已存在的模组配置:"
+        find "${SDK_ROOT_DIR}/${DEVICE_BASE_PATH}" -maxdepth 2 -name "*.mk" -type f 2>/dev/null | sort || true
         exit 1
+    fi
+    # 修正 MODULE_NAME 为磁盘上的实际大小写
+    local real_module_dir
+    real_module_dir=$(dirname "$device_mk_path")
+    local real_module_name
+    real_module_name=$(basename "$real_module_dir")
+    if [[ "$real_module_name" != "$MODULE_NAME" ]]; then
+        log_info "模组型号大小写修正: '${MODULE_NAME}' → '${real_module_name}'"
+        MODULE_NAME="$real_module_name"
     fi
     log_info "找到设备配置文件: $device_mk_path"
     
@@ -390,10 +404,10 @@ generate_image_name() {
 
     if [[ "$BUILD_TYPE" == "debug" ]]; then
         build_type_capital="Debug"
-        IMAGE_NAME="${chip}_${platform}_${chipset}_${MODULE_NAME}_${version}_${build_type_capital}_${BUILD_DATE}.${BUILD_TIME}.img"
+        IMAGE_NAME="${chip}_${platform}_${chipset}_${MODULE_NAME^^}_${version}_${build_type_capital}_${BUILD_DATE}.${BUILD_TIME}.img"
     else
         build_type_capital="Release"
-        IMAGE_NAME="${chip}_${platform}_${chipset}_${MODULE_NAME}_${version}_${build_type_capital}_${BUILD_DATE}_${GIT_HASH}.img"
+        IMAGE_NAME="${chip}_${platform}_${chipset}_${MODULE_NAME^^}_${version}_${build_type_capital}_${BUILD_DATE}_${GIT_HASH}.img"
     fi
     
     IMAGE_BASENAME="${IMAGE_NAME%.img}"
@@ -459,10 +473,11 @@ copy_image() {
     # 路径格式: IMAGE/RK356X_<模组型号>_<日期>.<时间>/IMAGES/RK356X_<模组型号>_<日期>.<时间>-update.img
     # 取该模组最新编译生成的镜像（按目录名排序取最新）
     local module_image_dir
-    module_image_dir=$(find "${SDK_ROOT_DIR}/IMAGE" -maxdepth 1 -type d -name "RK356X_${MODULE_NAME}_*" 2>/dev/null | sort | tail -1)
-    
+    module_image_dir=$(find "${SDK_ROOT_DIR}/IMAGE" -maxdepth 1 -type d -iname "RK356X_${MODULE_NAME}_*" 2>/dev/null | sort | tail -1)
+
     if [[ -z "$module_image_dir" ]]; then
-        log_error "未找到模组 '$MODULE_NAME' 的编译输出目录: ${SDK_ROOT_DIR}/IMAGE/RK356X_${MODULE_NAME}_*"
+        log_error "未找到模组 '${MODULE_NAME}' 的编译输出目录"
+        log_error "搜索路径: ${SDK_ROOT_DIR}/IMAGE/RK356X_*${MODULE_NAME}*（大小写不敏感）"
         exit 1
     fi
     
