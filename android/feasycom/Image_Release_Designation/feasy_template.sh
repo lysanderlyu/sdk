@@ -169,10 +169,12 @@ clone_project() {
     local uboot_defconfig_src=$(find_actual_filepath "$UBOOT_DEFCONFIG_BASE" "${source_upper}_defconfig")
     local kernel_dts_src=$(find_actual_filepath "$KERNEL_DTS_BASE" "${source_upper}-android.dts")
     local kernel_defconfig_src=$(find_actual_filepath "$KERNEL_CONFIG_BASE" "${source_upper}-android_defconfig")
+    local kernel_dts_tmp_domain_src=$(find_actual_filepath "$KERNEL_DTS_BASE" ".${source_upper}-android.dtb.dts.tmp.domain")
     [[ -n "$uboot_dts_src" ]] && echo "[OK] u-boot DTS → $(basename $uboot_dts_src)" || echo "[INFO] u-boot DTS will be skipped (not found)"
     [[ -n "$uboot_defconfig_src" ]] && echo "[OK] u-boot defconfig → $(basename $uboot_defconfig_src)" || echo "[INFO] u-boot defconfig will be skipped (not found)"
     [[ -n "$kernel_dts_src" ]] && echo "[OK] kernel DTS → $(basename $kernel_dts_src)" || echo "[INFO] kernel DTS will be skipped (not found)"
     [[ -n "$kernel_defconfig_src" ]] && echo "[OK] kernel defconfig → $(basename $kernel_defconfig_src)" || echo "[INFO] kernel defconfig will be skipped (not found)"
+    [[ -n "$kernel_dts_tmp_domain_src" ]] && echo "[OK] kernel DTS tmp domain → $(basename $kernel_dts_tmp_domain_src)" || echo "[INFO] kernel DTS tmp domain will be skipped (not found)"
 
     # 4. Check if target project directory already exists
     local target_dir="${RK_BASE_DIR}/${target_proj}"
@@ -220,6 +222,7 @@ clone_project() {
     [[ -n "$uboot_defconfig_src" ]] && cp "$uboot_defconfig_src" "${UBOOT_DEFCONFIG_BASE}/${target_proj}_defconfig"
     [[ -n "$kernel_dts_src" ]] && cp "$kernel_dts_src" "${KERNEL_DTS_BASE}/${target_proj}-android.dts"
     [[ -n "$kernel_defconfig_src" ]] && cp "$kernel_defconfig_src" "${KERNEL_CONFIG_BASE}/${target_proj}-android_defconfig"
+    [[ -n "$kernel_dts_tmp_domain_src" ]] && cp "$kernel_dts_tmp_domain_src" "${KERNEL_DTS_BASE}/.${target_proj}-android.dtb.dts.tmp.domain"
 
     # Append BSP metadata to .mk file
     echo "[4/5] Appending BSP metadata"
@@ -291,6 +294,14 @@ delete_project() {
         rm -f "$actual_file" || echo "WARNING: Failed to delete kernel defconfig"
     else
         echo "INFO: kernel defconfig not found, skipping"
+    fi
+
+    # Deletes kernel DTS tmp domain file (case-insensitive)
+    actual_file=$(find_actual_filepath "$KERNEL_DTS_BASE" ".${target_proj}-android.dtb.dts.tmp.domain")
+    if [[ -n "$actual_file" ]]; then
+        rm -f "$actual_file" || echo "WARNING: Failed to delete kernel DTS tmp domain"
+    else
+        echo "INFO: kernel DTS tmp domain not found, skipping"
     fi
 
     echo -e "\nSUCCESS: Project ${target_proj} deleted successfully!"
