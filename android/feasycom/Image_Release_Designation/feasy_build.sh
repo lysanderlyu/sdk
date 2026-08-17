@@ -28,11 +28,13 @@ NC='\033[0m' # No Color
 # ===================== 全局变量 =====================
 MODULE_NAME=""
 BUILD_TYPE="debug"  # debug 或 release
+BUILD_SCOPE="all"   # all | uboot | kernel | android
 VERBOSE=false
 CLEAN_BUILD=false
 SUBMODULE_UPDATE=false
 DRY_RUN=false
 IMAGE_BASENAME=""
+GENERATED_UPDATE_IMG=""
 
 # ===================== 日志函数 =====================
 log_info() {
@@ -75,8 +77,11 @@ usage() {
     -m, --module <模组型号>     指定模组型号 (如: BW8205, BW8105)
     -d, --debug                 编译 Debug 调试固件 (默认)
     -r, --release               编译 Release 发行版固件
+    -u, --uboot-only            仅编译 U-Boot（build.sh -Uu，提示 update.img 路径，不拷贝发行镜像）
+    -k, --kernel-only           仅编译 Kernel（build.sh -Ku，提示 update.img 路径，不拷贝发行镜像）
+    -a, --android-only          仅编译 Android（build.sh -Au，提示 update.img 路径，不拷贝发行镜像）
     -c, --clean                 先执行 clean 再编译
-    -u, --update-submodules     更新 Git submodules
+    -U, --update-submodules     更新 Git submodules
     -v, --verbose               详细输出模式
 
 示例:
@@ -84,10 +89,16 @@ usage() {
     $0 -m BW8205                      一键编译 Debug 版 BW8205 固件（默认，source + lunch + build.sh -UKAup）
     $0 -m BW8205 -d                   编译 Debug 调试版 BW8205 固件
     $0 -m BW8205 -r                   编译 Release 发行版 BW8205 固件（检查 Git 未提交修改）
-    $0 -m BW8205 -c -u                先 clean 并更新 submodules 后编译
+    $0 -m BW8205 -u                   仅编译 U-Boot（build.sh -Uu，打包 update.img 但不拷贝发行镜像）
+    $0 -m BW8205 -k                   仅编译 Kernel（build.sh -Ku，打包 update.img 但不拷贝发行镜像）
+    $0 -m BW8205 -a                   仅编译 Android（build.sh -Au，打包 update.img 但不拷贝发行镜像）
+    $0 -m BW8205 -c -U                先 clean 并更新 submodules 后编译
     $0 -m BW8205 -d -v                Debug 编译 + 详细输出
 
 说明:
+    默认全量编译: build.sh -UKAup（U-Boot + Kernel + Android + update.img + IMAGE 打包）
+    -u / -k / -a 互斥，且与全量流程互斥；仅编译模式会打包 update.img 并提示路径，但不拷贝到发行目录、不生成上传相关文件。
+
     Debug调试版命名:   [项目主控_芯片组]_[系统平台]_[模组芯片]_[模组型号]_[版本号]_Debug_[年月日].[时分].img
     Release发行版命名: [项目主控_芯片组]_[系统平台]_[模组芯片]_[模组型号]_[版本号]_Release_[年月日]_[Git哈希].img
 
@@ -136,11 +147,23 @@ parse_args() {
                 BUILD_TYPE="release"
                 shift
                 ;;
+            -u|--uboot-only)
+                set_build_scope "uboot" "-u/--uboot-only"
+                shift
+                ;;
+            -k|--kernel-only)
+                set_build_scope "kernel" "-k/--kernel-only"
+                shift
+                ;;
+            -a|--android-only)
+                set_build_scope "android" "-a/--android-only"
+                shift
+                ;;
             -c|--clean)
                 CLEAN_BUILD=true
                 shift
                 ;;
-            -u|--update-submodules)
+            -U|--update-submodules)
                 SUBMODULE_UPDATE=true
                 shift
                 ;;
@@ -384,6 +407,28 @@ get_version_info() {
     log_info "版本号: $PRODUCT_CUSTOM_VERSION"
 }
 
+# ===================== 仅编译范围互斥 =====================
+# -u / -k / -a 不能同时使用
+set_build_scope() {
+    local new_scope="$1"
+    local flag="$2"
+    if [[ "$BUILD_SCOPE" != "all" ]]; then
+        log_error "${flag} 与已选择的仅编译选项互斥（-u/--uboot-only、-k/--kernel-only、-a/--android-only 不能同时使用）"
+        exit 1
+    fi
+    BUILD_SCOPE="$new_scope"
+}
+
+# ===================== 编译范围描述 =====================
+describe_build_scope() {
+    case "$BUILD_SCOPE" in
+        uboot)   echo "仅 U-Boot (build.sh -Uu)" ;;
+        kernel)  echo "仅 Kernel (build.sh -Ku)" ;;
+        android) echo "仅 Android (build.sh -Au)" ;;
+        *)       echo "全量 (build.sh -UKAup)" ;;
+    esac
+}
+
 # ===================== 编译前配置确认 =====================
 confirm_config() {
     log_step "编译配置确认"
@@ -391,6 +436,7 @@ confirm_config() {
     echo ""
     echo -e "  模组型号:         ${CYAN}${MODULE_NAME}${NC}"
     echo -e "  编译类型:         ${CYAN}${BUILD_TYPE}${NC}"
+    echo -e "  编译范围:         ${CYAN}$(describe_build_scope)${NC}"
     echo -e "  项目主控_芯片组:  ${CYAN}${PRODUCT_CUSTOM_CHIP}${NC}"
     echo -e "  系统平台:         ${CYAN}${PRODUCT_SYSTEM_PLATFORM}${NC}"
     echo -e "  模组芯片:         ${CYAN}${PRODUCT_CHIPSET_NAME}${NC}"
@@ -497,18 +543,32 @@ run_build() {
     cd "$SDK_ROOT_DIR"
     
     log_info "编译类型: $BUILD_TYPE"
+    log_info "编译范围: $(describe_build_scope)"
     log_info "模组型号: $MODULE_NAME"
     
     # 构建编译命令
     local build_cmd="./build.sh"
     local build_args=""
-    
-    # 根据编译类型添加参数
-    if [[ "$BUILD_TYPE" == "debug" ]]; then
-        build_args="-UKAup"  # Debug 编译参数
-    else
-        build_args="-UKAup"  # Release 编译参数（与 Debug 相同，但会检查 Git 状态）
-    fi
+
+    case "$BUILD_SCOPE" in
+        uboot)
+            # 仅 U-Boot：编译并打包 update.img，不走 IMAGE/-p 发行拷贝
+            build_args="-Uu"
+            ;;
+        kernel)
+            # 仅 Kernel：编译并打包 update.img，不走 IMAGE/-p 发行拷贝
+            build_args="-Ku"
+            ;;
+        android)
+            # 仅 Android：编译并打包 update.img，不走 IMAGE/-p 发行拷贝
+            build_args="-Au"
+            ;;
+        *)
+            # 全量：U-Boot + Kernel + Android + update.img + IMAGE 打包
+            # Debug/Release 传参相同，Release 额外在 check_git_status 中校验干净工作区
+            build_args="-UKAup"
+            ;;
+    esac
     
     log_info "执行编译命令: $build_cmd $build_args"
     
@@ -524,6 +584,53 @@ run_build() {
         log_error "编译失败"
         exit 1
     fi
+}
+
+# ===================== 查找编译生成的 update.img =====================
+find_image_dir_update_img() {
+    # 路径格式: IMAGE/RK356X_<模组型号>_<日期>.<时间>/IMAGES/RK356X_<模组型号>_<日期>.<时间>-update.img
+    # 取该模组最新编译生成的镜像（按目录名排序取最新）
+    local module_image_dir
+    module_image_dir=$(find "${SDK_ROOT_DIR}/IMAGE" -maxdepth 1 -type d -iname "RK356X_${MODULE_NAME}_*" 2>/dev/null | sort | tail -1)
+    [[ -z "$module_image_dir" ]] && return 1
+
+    local generated_image="${module_image_dir}/IMAGES/$(basename "${module_image_dir}")-update.img"
+    if [[ ! -f "$generated_image" ]]; then
+        generated_image=$(find "${module_image_dir}" -name "*update.img" -type f 2>/dev/null | head -1)
+    fi
+    [[ -n "$generated_image" && -f "$generated_image" ]] || return 1
+    echo "$generated_image"
+}
+
+find_rockdev_update_img() {
+    if [[ -f "${SDK_ROOT_DIR}/rockdev/update.img" ]]; then
+        echo "${SDK_ROOT_DIR}/rockdev/update.img"
+        return 0
+    fi
+    local rockdev_img
+    rockdev_img=$(find "${SDK_ROOT_DIR}/rockdev" -maxdepth 2 -type f -name "update.img" 2>/dev/null | sort | tail -1)
+    [[ -n "$rockdev_img" && -f "$rockdev_img" ]] || return 1
+    echo "$rockdev_img"
+}
+
+find_generated_update_img() {
+    GENERATED_UPDATE_IMG=""
+    local found=""
+
+    # 全量带 -p，结果在 IMAGE/；仅编译走 -u 不带 -p，结果在 rockdev/
+    if [[ "$BUILD_SCOPE" == "all" ]]; then
+        found=$(find_image_dir_update_img || true)
+        [[ -z "$found" ]] && found=$(find_rockdev_update_img || true)
+    else
+        found=$(find_rockdev_update_img || true)
+        [[ -z "$found" ]] && found=$(find_image_dir_update_img || true)
+    fi
+
+    if [[ -n "$found" ]]; then
+        GENERATED_UPDATE_IMG="$found"
+        return 0
+    fi
+    return 1
 }
 
 # ===================== 复制镜像 =====================
@@ -542,31 +649,14 @@ copy_image() {
     mkdir -p "$output_dir"
 
     log_info "输出目录: $output_dir"
-    
-    # 查找编译生成的镜像文件
-    # 路径格式: IMAGE/RK356X_<模组型号>_<日期>.<时间>/IMAGES/RK356X_<模组型号>_<日期>.<时间>-update.img
-    # 取该模组最新编译生成的镜像（按目录名排序取最新）
-    local module_image_dir
-    module_image_dir=$(find "${SDK_ROOT_DIR}/IMAGE" -maxdepth 1 -type d -iname "RK356X_${MODULE_NAME}_*" 2>/dev/null | sort | tail -1)
 
-    if [[ -z "$module_image_dir" ]]; then
-        log_error "未找到模组 '${MODULE_NAME}' 的编译输出目录"
-        log_error "搜索路径: ${SDK_ROOT_DIR}/IMAGE/RK356X_*${MODULE_NAME}*（大小写不敏感）"
+    if ! find_generated_update_img; then
+        log_error "未找到模组 '${MODULE_NAME}' 的编译输出镜像"
+        log_error "搜索路径: ${SDK_ROOT_DIR}/IMAGE/RK356X_${MODULE_NAME}_* 与 ${SDK_ROOT_DIR}/rockdev/update.img"
         exit 1
     fi
-    
-    local generated_image="${module_image_dir}/IMAGES/$(basename "${module_image_dir}")-update.img"
-    
-    if [[ ! -f "$generated_image" ]]; then
-        log_warn "预期路径未找到镜像，尝试在目录中搜索..."
-        generated_image=$(find "${module_image_dir}" -name "*.img" -type f 2>/dev/null | head -1)
-    fi
-    
-    if [[ -z "$generated_image" ]]; then
-        log_error "未找到编译生成的镜像文件"
-        exit 1
-    fi
-    
+
+    local generated_image="$GENERATED_UPDATE_IMG"
     log_info "找到生成的镜像: $generated_image"
     
     # 复制并重命名镜像
@@ -766,11 +856,24 @@ show_summary() {
     echo ""
     echo "  模组型号:     $MODULE_NAME"
     echo "  编译类型:     $BUILD_TYPE"
-    echo "  镜像文件:     ${IMAGES_OUTPUT_DIR}/${output_subdir}/${IMAGE_BASENAME}/${IMAGE_NAME}"
+    echo "  编译范围:     $(describe_build_scope)"
     echo "  Git 哈希:     $GIT_HASH"
-    echo ""
-    echo -e "${YELLOW}  上传命令:${NC}"
-    echo "  FTP_PASS="密码" ./feasy_upload.sh ${IMAGES_OUTPUT_DIR}/${output_subdir}/${IMAGE_BASENAME}/${IMAGE_NAME}"
+
+    if [[ "$BUILD_SCOPE" == "all" ]]; then
+        echo "  镜像文件:     ${IMAGES_OUTPUT_DIR}/${output_subdir}/${IMAGE_BASENAME}/${IMAGE_NAME}"
+        echo ""
+        echo -e "${YELLOW}  上传命令:${NC}"
+        echo "  FTP_PASS=\"密码\" ./feasy_upload.sh ${IMAGES_OUTPUT_DIR}/${output_subdir}/${IMAGE_BASENAME}/${IMAGE_NAME}"
+    else
+        echo ""
+        echo -e "${YELLOW}  提示: 仅编译模式已打包 update.img，但未拷贝到发行目录${NC}"
+        if [[ -n "$GENERATED_UPDATE_IMG" ]]; then
+            echo "  update.img:   $GENERATED_UPDATE_IMG"
+        else
+            echo "  update.img:   未找到（请检查 rockdev/update.img 或 IMAGE/ 目录）"
+        fi
+        echo -e "${YELLOW}  如需发行命名镜像并拷贝到 IMAGES/，请去掉 -u/-k/-a 做全量编译${NC}"
+    fi
     echo ""
 }
 
@@ -790,7 +893,7 @@ main() {
     
     echo ""
     echo -e "${CYAN}╔═══════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║      Feasycom 模组测试镜像编译工具 v1.0       ║${NC}"
+    echo -e "${CYAN}║      Feasycom 模组测试镜像编译工具 v1.2       ║${NC}"
     echo -e "${CYAN}╚═══════════════════════════════════════════════╝${NC}"
     echo ""
     
@@ -818,20 +921,24 @@ main() {
     # 7. 编译前准备
     prepare_build
 
-    # 8. 生成镜像名
-    generate_image_name
-
-    # 9. 执行编译
+    # 8. 执行编译
     run_build
 
-    # 10. 复制镜像
-    copy_image
-
-    # 11. 生成构建记录 (build_info.txt + build_info.diff)
-    generate_build_info
-
-    # 12. 生成编译报告
-    generate_build_report
+    # 9-12. 全量编译才拷贝发行镜像与生成上传相关文件
+    # 仅 U-Boot/Kernel/Android 编译：打包 update.img 后提示路径，不拷贝
+    if [[ "$BUILD_SCOPE" == "all" ]]; then
+        generate_image_name
+        copy_image
+        generate_build_info
+        generate_build_report
+    else
+        log_info "仅编译模式（${BUILD_SCOPE}），跳过镜像拷贝 / build_info / 编译报告"
+        if find_generated_update_img; then
+            log_info "update.img 路径: ${GENERATED_UPDATE_IMG}"
+        else
+            log_warn "未找到 update.img，请检查 rockdev/ 或 IMAGE/ 目录"
+        fi
+    fi
 
     # 13. 显示结果摘要
     show_summary
