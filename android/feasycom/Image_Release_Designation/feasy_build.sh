@@ -437,6 +437,7 @@ confirm_config() {
     echo -e "  模组型号:         ${CYAN}${MODULE_NAME}${NC}"
     echo -e "  编译类型:         ${CYAN}${BUILD_TYPE}${NC}"
     echo -e "  编译范围:         ${CYAN}$(describe_build_scope)${NC}"
+    echo -e "  产品镜像目录:     ${CYAN}$(get_rockdev_image_dir)${NC}"
     echo -e "  项目主控_芯片组:  ${CYAN}${PRODUCT_CUSTOM_CHIP}${NC}"
     echo -e "  系统平台:         ${CYAN}${PRODUCT_SYSTEM_PLATFORM}${NC}"
     echo -e "  模组芯片:         ${CYAN}${PRODUCT_CHIPSET_NAME}${NC}"
@@ -545,6 +546,7 @@ run_build() {
     log_info "编译类型: $BUILD_TYPE"
     log_info "编译范围: $(describe_build_scope)"
     log_info "模组型号: $MODULE_NAME"
+    log_info "产品镜像目录: $(get_rockdev_image_dir)"
     
     # 构建编译命令
     local build_cmd="./build.sh"
@@ -602,15 +604,52 @@ find_image_dir_update_img() {
     echo "$generated_image"
 }
 
+# Rockchip 将各产品镜像放到 rockdev/Image-$TARGET_PRODUCT/
+# 目录名大小写不敏感，例如 Image-bw6002gi / Image-BW6002GI / image-Bw6002gi 均可
+get_rockdev_image_dir() {
+    local rockdev_dir="${SDK_ROOT_DIR}/rockdev"
+    local product_lower="${MODULE_NAME,,}"
+    local expected="${rockdev_dir}/Image-${product_lower}"
+    local expected_base_lower="image-${product_lower}"
+
+    if [[ -d "$rockdev_dir" ]]; then
+        local dir base
+        for dir in "$rockdev_dir"/*; do
+            [[ -d "$dir" ]] || continue
+            base="$(basename "$dir")"
+            if [[ "${base,,}" == "$expected_base_lower" ]]; then
+                echo "$dir"
+                return 0
+            fi
+        done
+    fi
+    echo "$expected"
+}
+
 find_rockdev_update_img() {
+    local image_dir
+    image_dir=$(get_rockdev_image_dir)
+
+    if [[ -f "${image_dir}/update.img" ]]; then
+        echo "${image_dir}/update.img"
+        return 0
+    fi
+
+    if [[ -d "$image_dir" ]]; then
+        local rockdev_img
+        rockdev_img=$(find "$image_dir" -maxdepth 1 -type f -name "update.img" 2>/dev/null | head -1)
+        if [[ -n "$rockdev_img" && -f "$rockdev_img" ]]; then
+            echo "$rockdev_img"
+            return 0
+        fi
+    fi
+
+    # mkupdate.sh 常把当前 lunch 产品的 update.img 写到 rockdev 根目录
     if [[ -f "${SDK_ROOT_DIR}/rockdev/update.img" ]]; then
         echo "${SDK_ROOT_DIR}/rockdev/update.img"
         return 0
     fi
-    local rockdev_img
-    rockdev_img=$(find "${SDK_ROOT_DIR}/rockdev" -maxdepth 2 -type f -name "update.img" 2>/dev/null | sort | tail -1)
-    [[ -n "$rockdev_img" && -f "$rockdev_img" ]] || return 1
-    echo "$rockdev_img"
+    return 1
 }
 
 find_generated_update_img() {
@@ -649,10 +688,11 @@ copy_image() {
     mkdir -p "$output_dir"
 
     log_info "输出目录: $output_dir"
+    log_info "产品镜像目录: $(get_rockdev_image_dir)"
 
     if ! find_generated_update_img; then
         log_error "未找到模组 '${MODULE_NAME}' 的编译输出镜像"
-        log_error "搜索路径: ${SDK_ROOT_DIR}/IMAGE/RK356X_${MODULE_NAME}_* 与 ${SDK_ROOT_DIR}/rockdev/update.img"
+        log_error "搜索路径: ${SDK_ROOT_DIR}/IMAGE/RK356X_${MODULE_NAME}_* 与 $(get_rockdev_image_dir)/update.img"
         exit 1
     fi
 
@@ -857,6 +897,7 @@ show_summary() {
     echo "  模组型号:     $MODULE_NAME"
     echo "  编译类型:     $BUILD_TYPE"
     echo "  编译范围:     $(describe_build_scope)"
+    echo "  产品镜像目录: $(get_rockdev_image_dir)"
     echo "  Git 哈希:     $GIT_HASH"
 
     if [[ "$BUILD_SCOPE" == "all" ]]; then
@@ -870,7 +911,7 @@ show_summary() {
         if [[ -n "$GENERATED_UPDATE_IMG" ]]; then
             echo "  update.img:   $GENERATED_UPDATE_IMG"
         else
-            echo "  update.img:   未找到（请检查 rockdev/update.img 或 IMAGE/ 目录）"
+            echo "  update.img:   未找到（请检查 $(get_rockdev_image_dir)/update.img 或 IMAGE/ 目录）"
         fi
         echo -e "${YELLOW}  如需发行命名镜像并拷贝到 IMAGES/，请去掉 -u/-k/-a 做全量编译${NC}"
     fi
@@ -893,7 +934,7 @@ main() {
     
     echo ""
     echo -e "${CYAN}╔═══════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║      Feasycom 模组测试镜像编译工具 v1.2       ║${NC}"
+    echo -e "${CYAN}║      Feasycom 模组测试镜像编译工具 v1.2.1     ║${NC}"
     echo -e "${CYAN}╚═══════════════════════════════════════════════╝${NC}"
     echo ""
     
@@ -933,10 +974,11 @@ main() {
         generate_build_report
     else
         log_info "仅编译模式（${BUILD_SCOPE}），跳过镜像拷贝 / build_info / 编译报告"
+        log_info "产品镜像目录: $(get_rockdev_image_dir)"
         if find_generated_update_img; then
             log_info "update.img 路径: ${GENERATED_UPDATE_IMG}"
         else
-            log_warn "未找到 update.img，请检查 rockdev/ 或 IMAGE/ 目录"
+            log_warn "未找到 update.img，请检查 $(get_rockdev_image_dir)/ 或 IMAGE/ 目录"
         fi
     fi
 
