@@ -33,8 +33,15 @@ VERBOSE=false
 CLEAN_BUILD=false
 SUBMODULE_UPDATE=false
 DRY_RUN=false
+COPY_FIRMWARE=false
+FW_MODULE_NAME=""
+SKIP_FW=false
+# 本次由脚本拷贝到目标目录的顶层条目（相对路径名），编译成功后用于清理
+FW_COPIED_ITEMS=()
+FW_DEST_DIR=""
 IMAGE_BASENAME=""
 GENERATED_UPDATE_IMG=""
+FW_SRC_BASE="vendor/rockchip/common/wifi/feasycom-fw"
 
 # ===================== 日志函数 =====================
 log_info() {
@@ -82,6 +89,8 @@ usage() {
     -a, --android-only          仅编译 Android（build.sh -Au，提示 update.img 路径，不拷贝发行镜像）
     -c, --clean                 先执行 clean 再编译
     -U, --update-submodules     更新 Git submodules
+    -f, --copy-fw <固件名>      编译前拷贝 WiFi 固件 (如: mt7963, atbm6165)
+    --skip-fw                   跳过 WiFi 固件拷贝（非交互模式默认跳过）
     -v, --verbose               详细输出模式
 
 示例:
@@ -94,6 +103,8 @@ usage() {
     $0 -m BW8205 -a                   仅编译 Android（build.sh -Au，打包 update.img 但不拷贝发行镜像）
     $0 -m BW8205 -c -U                先 clean 并更新 submodules 后编译
     $0 -m BW8205 -d -v                Debug 编译 + 详细输出
+    $0 -m BW8205 -f mt7963            编译前拷贝 mt7963 WiFi 固件
+    $0 -m BW8205 --skip-fw            编译时不拷贝 WiFi 固件
 
 说明:
     默认全量编译: build.sh -UKAup（U-Boot + Kernel + Android + update.img + IMAGE 打包）
@@ -116,6 +127,14 @@ usage() {
 
     设备配置文件路径规则: device/rockchip/rk356x/<模组型号>/<模组型号>.mk
     例如: -m BW8205 则配置文件为 device/rockchip/rk356x/BW8205/BW8205.mk
+
+    WiFi 固件拷贝（交互模式）:
+        默认按 PRODUCT_CHIPSET_NAME 自动匹配固件目录（大小写不敏感），
+        仅提示是否拷贝 (Y/n)；也可通过 -f/--copy-fw 指定固件名或路径。
+        源: ${FW_SRC_BASE:-vendor/rockchip/common/wifi/feasycom-fw}/<固件名>/*
+        目标: device/rockchip/rk356x/<模组型号>/wifi/firmware/
+        若本次由脚本拷贝固件，编译成功后会自动删除本次拷贝的文件，保持工作区干净。
+        -f 输入错误时会列出所有可拷贝的固件源路径与目标路径
 EOF
     exit 0
 }
@@ -167,6 +186,19 @@ parse_args() {
                 SUBMODULE_UPDATE=true
                 shift
                 ;;
+            -f|--copy-fw)
+                if [[ -z "$2" || "$2" =~ ^- ]]; then
+                    log_error "选项 $1 需要一个参数"
+                    exit 1
+                fi
+                FW_MODULE_NAME="$2"
+                COPY_FIRMWARE=true
+                shift 2
+                ;;
+            --skip-fw|--no-fw)
+                SKIP_FW=true
+                shift
+                ;;
             -v|--verbose)
                 VERBOSE=true
                 shift
@@ -182,6 +214,11 @@ parse_args() {
     # 检查必要参数
     if [[ -z "$MODULE_NAME" ]]; then
         log_error "必须指定模组型号 (-m 选项)"
+        exit 1
+    fi
+
+    if [[ "$SKIP_FW" == true && "$COPY_FIRMWARE" == true ]]; then
+        log_error "--skip-fw 与 -f/--copy-fw 不能同时使用"
         exit 1
     fi
 }
@@ -442,6 +479,11 @@ confirm_config() {
     echo -e "  系统平台:         ${CYAN}${PRODUCT_SYSTEM_PLATFORM}${NC}"
     echo -e "  模组芯片:         ${CYAN}${PRODUCT_CHIPSET_NAME}${NC}"
     echo -e "  版本号:           ${CYAN}${PRODUCT_CUSTOM_VERSION}${NC}"
+    if [[ "$COPY_FIRMWARE" == true ]]; then
+        echo -e "  WiFi 固件拷贝:    ${CYAN}${FW_MODULE_NAME} → ${DEVICE_BASE_PATH}/${MODULE_NAME}/wifi/firmware/${NC}"
+    else
+        echo -e "  WiFi 固件拷贝:    ${CYAN}跳过${NC}"
+    fi
     echo ""
 
     if [[ ! -t 0 ]]; then
@@ -456,6 +498,277 @@ confirm_config() {
         exit 1
     fi
     log_info "配置确认通过"
+}
+
+# ===================== 列出可用 WiFi 固件 =====================
+list_available_fw_modules() {
+    local fw_base="${SDK_ROOT_DIR}/${FW_SRC_BASE}"
+    [[ -d "$fw_base" ]] || return 1
+    find "$fw_base" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | sort -f
+}
+
+# 列出所有可拷贝的固件源路径与目标路径
+print_available_firmware_paths() {
+    local fw_base="${SDK_ROOT_DIR}/${FW_SRC_BASE}"
+    local dest_base="${DEVICE_BASE_PATH}/${MODULE_NAME}/wifi/firmware"
+
+    if [[ ! -d "$fw_base" ]]; then
+        log_error "固件源根目录不存在: ${FW_SRC_BASE}"
+        return 1
+    fi
+
+    local modules
+    modules=$(list_available_fw_modules || true)
+    if [[ -z "$modules" ]]; then
+        log_error "固件源目录为空: ${FW_SRC_BASE}"
+        return 1
+    fi
+
+    echo ""
+    echo "可用的 WiFi 固件路径 (源 → 目标):"
+    while IFS= read -r mod; do
+        [[ -n "$mod" ]] || continue
+        echo "  ${FW_SRC_BASE}/${mod}/"
+        echo "    → ${dest_base}/"
+    done <<< "$modules"
+    echo ""
+    echo "使用示例:"
+    local first_mod
+    first_mod=$(echo "$modules" | head -1)
+    echo "  -f ${first_mod}"
+    echo "  -f ${FW_SRC_BASE}/${first_mod}"
+    echo ""
+}
+
+# Case-insensitive lookup of firmware module directory name on disk
+resolve_fw_module_name() {
+    local input="$1"
+    local fw_base="${SDK_ROOT_DIR}/${FW_SRC_BASE}"
+    local found
+
+    [[ -n "$input" ]] || return 1
+    [[ -d "$fw_base" ]] || return 1
+
+    found=$(find "$fw_base" -maxdepth 1 -mindepth 1 -type d -iname "$input" -print -quit 2>/dev/null)
+    [[ -n "$found" ]] || return 1
+    basename "$found"
+}
+
+# 从固件名或路径中提取模组目录名（大小写不敏感）
+extract_fw_module_from_input() {
+    local input="$1"
+    local candidate resolved
+    local fw_base_rel="${FW_SRC_BASE}"
+
+    [[ -n "$input" ]] || return 1
+
+    input="${input%/}"
+
+    # 去掉 SDK 根目录前缀，便于统一按相对路径处理
+    if [[ "$input" == "${SDK_ROOT_DIR}/"* ]]; then
+        input="${input#${SDK_ROOT_DIR}/}"
+    fi
+    input="${input#./}"
+
+    if [[ "$input" == */* ]]; then
+        if [[ "$input" == "${fw_base_rel}/"* ]]; then
+            candidate="${input#${fw_base_rel}/}"
+            candidate="${candidate%%/*}"
+        elif [[ "$input" == */feasycom-fw/* ]]; then
+            candidate="${input##*/feasycom-fw/}"
+            candidate="${candidate%%/*}"
+        else
+            candidate="${input##*/}"
+        fi
+    else
+        candidate="$input"
+    fi
+
+    [[ -n "$candidate" ]] || return 1
+    resolve_fw_module_name "$candidate"
+}
+
+# Normalize FW_MODULE_NAME to the actual directory name (case-insensitive)
+normalize_fw_module_name() {
+    if [[ "$COPY_FIRMWARE" != true || -z "$FW_MODULE_NAME" ]]; then
+        return 0
+    fi
+
+    local original_input="$FW_MODULE_NAME"
+    local resolved
+    if ! resolved=$(extract_fw_module_from_input "$FW_MODULE_NAME"); then
+        log_error "未找到 WiFi 固件路径（大小写不敏感）: ${original_input}"
+        log_error "期望格式: <固件名> 或 ${FW_SRC_BASE}/<固件名>"
+        print_available_firmware_paths >&2
+        exit 1
+    fi
+
+    if [[ "$resolved" != "$original_input" && "${resolved,,}" != "${original_input,,}" ]]; then
+        log_info "固件路径解析: '${original_input}' → '${FW_SRC_BASE}/${resolved}'"
+    elif [[ "$resolved" != "$original_input" ]]; then
+        log_info "固件名大小写修正: '${original_input}' → '${resolved}'"
+    fi
+    FW_MODULE_NAME="$resolved"
+}
+
+# ===================== WiFi 固件拷贝选择 =====================
+prompt_firmware_copy() {
+    if [[ "$SKIP_FW" == true ]]; then
+        log_info "已跳过 WiFi 固件拷贝 (--skip-fw)"
+        return 0
+    fi
+
+    if [[ "$COPY_FIRMWARE" == true ]]; then
+        normalize_fw_module_name
+        log_info "将拷贝 WiFi 固件: ${FW_MODULE_NAME} (-f/--copy-fw)"
+        return 0
+    fi
+
+    if [[ ! -t 0 ]]; then
+        log_info "非交互模式且未指定 -f，跳过 WiFi 固件拷贝"
+        return 0
+    fi
+
+    local fw_base="${SDK_ROOT_DIR}/${FW_SRC_BASE}"
+    if [[ ! -d "$fw_base" ]]; then
+        log_warn "未找到固件源目录 ${fw_base}，跳过 WiFi 固件拷贝"
+        return 0
+    fi
+
+    # 默认按 PRODUCT_CHIPSET_NAME 自动匹配固件目录（大小写不敏感）
+    local resolved
+    if ! resolved=$(resolve_fw_module_name "$PRODUCT_CHIPSET_NAME"); then
+        log_warn "未找到与 PRODUCT_CHIPSET_NAME='${PRODUCT_CHIPSET_NAME}' 匹配的固件目录，跳过拷贝"
+        print_available_firmware_paths >&2 || true
+        return 0
+    fi
+
+    echo ""
+    echo -e "  固件: ${CYAN}${resolved}${NC} (来自 PRODUCT_CHIPSET_NAME)"
+    echo -e "  源:   ${CYAN}${FW_SRC_BASE}/${resolved}/${NC}"
+    echo -e "  目标: ${CYAN}${DEVICE_BASE_PATH}/${MODULE_NAME}/wifi/firmware/${NC}"
+    echo ""
+    echo -e -n "是否拷贝该 WiFi 固件？(Y/n): "
+    read -r fw_confirm
+    if [[ "$fw_confirm" == "n" || "$fw_confirm" == "N" ]]; then
+        log_info "跳过 WiFi 固件拷贝"
+        return 0
+    fi
+
+    FW_MODULE_NAME="$resolved"
+    COPY_FIRMWARE=true
+    log_info "将拷贝 WiFi 固件: ${FW_MODULE_NAME}"
+}
+
+# ===================== 执行 WiFi 固件拷贝 =====================
+copy_wifi_firmware() {
+    if [[ "$COPY_FIRMWARE" != true ]]; then
+        return 0
+    fi
+
+    log_step "拷贝 WiFi 固件"
+
+    local firmware_script
+    firmware_script="$(cd "$(dirname "$0")" && pwd)/feasy_firmware.sh"
+
+    if [[ ! -f "$firmware_script" ]]; then
+        log_error "未找到 feasy_firmware.sh: ${firmware_script}"
+        exit 1
+    fi
+
+    local src_dir="${SDK_ROOT_DIR}/${FW_SRC_BASE}/${FW_MODULE_NAME}"
+    FW_DEST_DIR="${SDK_ROOT_DIR}/${DEVICE_BASE_PATH}/${MODULE_NAME}/wifi/firmware"
+
+    log_info "项目: ${MODULE_NAME}"
+    log_info "固件: ${FW_MODULE_NAME}"
+    log_info "源: ${FW_SRC_BASE}/${FW_MODULE_NAME}/"
+    log_info "目标: ${DEVICE_BASE_PATH}/${MODULE_NAME}/wifi/firmware/"
+
+    # 记录即将拷贝的顶层条目，编译成功后按此列表清理
+    FW_COPIED_ITEMS=()
+    if [[ -d "$src_dir" ]]; then
+        local item
+        while IFS= read -r item; do
+            [[ -n "$item" ]] && FW_COPIED_ITEMS+=("$item")
+        done < <(find "$src_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null \
+            || find "$src_dir" -mindepth 1 -maxdepth 1 -exec basename {} \; 2>/dev/null)
+    fi
+
+    if [[ ${#FW_COPIED_ITEMS[@]} -eq 0 ]]; then
+        log_warn "源目录无可拷贝文件: ${src_dir}"
+    else
+        log_info "本次将拷贝 ${#FW_COPIED_ITEMS[@]} 个条目（编译成功后自动清理）"
+        if [[ "$VERBOSE" == true ]]; then
+            local name
+            for name in "${FW_COPIED_ITEMS[@]}"; do
+                log_debug "  - ${name}"
+            done
+        fi
+    fi
+
+    if [[ "$DRY_RUN" == true ]]; then
+        log_info "[模拟] SDK_ROOT_DIR=${SDK_ROOT_DIR} ${firmware_script} -p ${MODULE_NAME} -m ${FW_MODULE_NAME} -f"
+        return 0
+    fi
+
+    if SDK_ROOT_DIR="$SDK_ROOT_DIR" "$firmware_script" -p "$MODULE_NAME" -m "$FW_MODULE_NAME" -f; then
+        log_info "WiFi 固件拷贝完成"
+    else
+        log_error "WiFi 固件拷贝失败"
+        FW_COPIED_ITEMS=()
+        FW_DEST_DIR=""
+        exit 1
+    fi
+}
+
+# ===================== 清理本次拷贝的 WiFi 固件 =====================
+# 仅删除本次脚本拷贝进去的顶层条目，不动目标目录中原有其他文件
+cleanup_copied_firmware() {
+    if [[ "$COPY_FIRMWARE" != true || ${#FW_COPIED_ITEMS[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    if [[ -z "$FW_DEST_DIR" ]]; then
+        FW_DEST_DIR="${SDK_ROOT_DIR}/${DEVICE_BASE_PATH}/${MODULE_NAME}/wifi/firmware"
+    fi
+
+    log_step "清理本次拷贝的 WiFi 固件"
+
+    if [[ "$DRY_RUN" == true ]]; then
+        log_info "[模拟] 将删除以下拷贝条目:"
+        local name
+        for name in "${FW_COPIED_ITEMS[@]}"; do
+            echo "  ${FW_DEST_DIR}/${name}"
+        done
+        return 0
+    fi
+
+    if [[ ! -d "$FW_DEST_DIR" ]]; then
+        log_warn "目标目录已不存在，无需清理: ${FW_DEST_DIR}"
+        FW_COPIED_ITEMS=()
+        return 0
+    fi
+
+    local removed=0
+    local missing=0
+    local name target
+    for name in "${FW_COPIED_ITEMS[@]}"; do
+        target="${FW_DEST_DIR}/${name}"
+        if [[ -e "$target" || -L "$target" ]]; then
+            if rm -rf "$target"; then
+                log_info "已删除: ${DEVICE_BASE_PATH}/${MODULE_NAME}/wifi/firmware/${name}"
+                ((removed++)) || true
+            else
+                log_warn "删除失败: ${target}"
+            fi
+        else
+            log_debug "已不存在，跳过: ${target}"
+            ((missing++)) || true
+        fi
+    done
+
+    log_info "固件清理完成: 删除 ${removed} 个条目$([ "$missing" -gt 0 ] && echo "，${missing} 个已不存在")"
+    FW_COPIED_ITEMS=()
 }
 
 # ===================== 更新 Submodules =====================
@@ -899,6 +1212,9 @@ show_summary() {
     echo "  编译范围:     $(describe_build_scope)"
     echo "  产品镜像目录: $(get_rockdev_image_dir)"
     echo "  Git 哈希:     $GIT_HASH"
+    if [[ "$COPY_FIRMWARE" == true ]]; then
+        echo "  WiFi 固件:    ${FW_MODULE_NAME}（已在编译成功后清理本次拷贝）"
+    fi
 
     if [[ "$BUILD_SCOPE" == "all" ]]; then
         echo "  镜像文件:     ${IMAGES_OUTPUT_DIR}/${output_subdir}/${IMAGE_BASENAME}/${IMAGE_NAME}"
@@ -934,7 +1250,7 @@ main() {
     
     echo ""
     echo -e "${CYAN}╔═══════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║      Feasycom 模组测试镜像编译工具 v1.2.1     ║${NC}"
+    echo -e "${CYAN}║      Feasycom 模组测试镜像编译工具 v1.3.0     ║${NC}"
     echo -e "${CYAN}╚═══════════════════════════════════════════════╝${NC}"
     echo ""
     
@@ -953,19 +1269,29 @@ main() {
     # 4. 校验 MK 配置字段
     validate_mk_meta
 
-    # 5. 编译前配置确认
+    # 5. WiFi 固件拷贝选择
+    prompt_firmware_copy
+    normalize_fw_module_name
+
+    # 6. 编译前配置确认
     confirm_config
 
-    # 6. 更新 Submodules
+    # 7. 拷贝 WiFi 固件（若已选择）
+    copy_wifi_firmware
+
+    # 8. 更新 Submodules
     update_submodules
 
-    # 7. 编译前准备
+    # 9. 编译前准备
     prepare_build
 
-    # 8. 执行编译
+    # 10. 执行编译
     run_build
 
-    # 9-12. 全量编译才拷贝发行镜像与生成上传相关文件
+    # 11. 编译成功后清理本次脚本拷贝的固件，保持工作区干净
+    cleanup_copied_firmware
+
+    # 12-15. 全量编译才拷贝发行镜像与生成上传相关文件
     # 仅 U-Boot/Kernel/Android 编译：打包 update.img 后提示路径，不拷贝
     if [[ "$BUILD_SCOPE" == "all" ]]; then
         generate_image_name
@@ -982,10 +1308,10 @@ main() {
         fi
     fi
 
-    # 13. 显示结果摘要
+    # 16. 显示结果摘要
     show_summary
 
-    # 14. 计算执行时间
+    # 17. 计算执行时间
     local end_time
     end_time=$(date +%s)
     local duration=$((end_time - start_time))
