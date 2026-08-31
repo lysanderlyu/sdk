@@ -494,7 +494,7 @@ prepare_build() {
         log_info "已加载 build/envsetup.sh"
         # Lunch 目标
         log_info "Lunch 目标: $MODULE_NAME"
-        if ! lunch "$MODULE_NAME" 2>&1; then
+        if ! lunch "$MODULE_NAME-userdebug" 2>&1; then
             log_error "lunch 失败，无法继续编译"
             log_error "请检查 BoardConfig.mk 等配置文件中是否存在变量冲突或语法错误"
             exit 1
