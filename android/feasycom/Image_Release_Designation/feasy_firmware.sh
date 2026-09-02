@@ -229,19 +229,47 @@ pre_checks() {
     fi
 }
 
+# 列出源目录中将拷贝的相对路径（文件/符号链接，保留层级）
+list_firmware_relative_paths() {
+    local src_dir="$1"
+    [[ -d "$src_dir" ]] || return 1
+    (cd "$src_dir" && find . -mindepth 1 \( -type f -o -type l \) | sed 's|^\./||' | sort)
+}
+
+print_firmware_copy_plan() {
+    local rel count=0 dest_name dest_parent
+    echo ""
+    echo "将拷贝以下文件（保留源目录层级）:"
+    echo "  源:   ${SRC_DIR}/"
+    echo "  目标: ${DEST_DIR}/"
+    echo ""
+    while IFS= read -r rel; do
+        [[ -n "$rel" ]] || continue
+        ((count++)) || true
+        printf "  %d. %s\n" "$count" "$rel"
+        dest_name="${rel##*/}"
+        dest_parent="${rel%/*}"
+        if [[ "$dest_parent" == "$rel" ]]; then
+            echo -e "     → ${CYAN}${DEST_DIR}/${GREEN}${dest_name}${NC}"
+        else
+            echo -e "     → ${CYAN}${DEST_DIR}/${dest_parent}/${GREEN}${dest_name}${NC}"
+        fi
+    done < <(list_firmware_relative_paths "$SRC_DIR" || true)
+    echo ""
+    log_info "共 ${count} 个文件"
+}
+
 # ===================== 拷贝固件 =====================
 copy_firmware() {
     log_step "拷贝 WiFi 固件"
+
+    print_firmware_copy_plan
 
     if [[ "$DRY_RUN" == true ]]; then
         if [[ ! -d "$DEST_DIR" && "$FORCE" == true ]]; then
             log_info "[模拟] mkdir -p ${DEST_DIR}"
         fi
-        log_info "[模拟] cp -rf ${SRC_DIR}/* ${DEST_DIR}/"
-        echo ""
-        echo "将拷贝的文件:"
-        find "$SRC_DIR" -mindepth 1 -maxdepth 1 -printf '  %f\n' 2>/dev/null \
-            || find "$SRC_DIR" -mindepth 1 -maxdepth 1 -exec basename {} \; 2>/dev/null | sed 's/^/  /'
+        log_info "[模拟] cp -a ${SRC_DIR}/. ${DEST_DIR}/"
         return 0
     fi
 
@@ -250,8 +278,8 @@ copy_firmware() {
         log_info "已创建目标目录: ${DEST_DIR}"
     fi
 
-    log_debug "执行: cp -rf \"${SRC_DIR}\"/* \"${DEST_DIR}/\""
-    if cp -rf "${SRC_DIR}"/* "${DEST_DIR}/"; then
+    log_debug "执行: cp -a \"${SRC_DIR}/.\" \"${DEST_DIR}/\""
+    if cp -a "${SRC_DIR}/." "${DEST_DIR}/"; then
         log_info "拷贝成功: ${SRC_DIR} → ${DEST_DIR}"
     else
         log_error "拷贝失败: ${SRC_DIR} → ${DEST_DIR}"
@@ -261,7 +289,7 @@ copy_firmware() {
     if [[ "$VERBOSE" == true ]]; then
         echo ""
         echo "目标目录内容:"
-        ls -la "$DEST_DIR"
+        (cd "$DEST_DIR" && find . -mindepth 1 | sed 's|^\./||' | sort | sed 's/^/  /')
     fi
 }
 
@@ -269,7 +297,7 @@ copy_firmware() {
 main() {
     echo ""
     echo -e "${CYAN}╔═══════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║      Feasycom WiFi 固件拷贝工具 v1.0          ║${NC}"
+    echo -e "${CYAN}║      Feasycom WiFi 固件拷贝工具 v1.1          ║${NC}"
     echo -e "${CYAN}╚═══════════════════════════════════════════════╝${NC}"
     echo ""
 

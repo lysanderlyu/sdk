@@ -131,8 +131,9 @@ usage() {
     WiFi 固件拷贝（交互模式）:
         默认按 PRODUCT_CHIPSET_NAME 自动匹配固件目录（大小写不敏感），
         仅提示是否拷贝 (Y/n)；也可通过 -f/--copy-fw 指定固件名或路径。
-        源: ${FW_SRC_BASE:-vendor/rockchip/common/wifi/feasycom-fw}/<固件名>/*
+        源: ${FW_SRC_BASE:-vendor/rockchip/common/wifi/feasycom-fw}/<固件名>/
         目标: device/rockchip/rk356x/<模组型号>/wifi/firmware/
+        拷贝前会列出将拷贝的文件（相对路径，保留源目录层级）。
         若本次由脚本拷贝固件，编译成功后会自动删除本次拷贝的文件，保持工作区干净。
         -f 输入错误时会列出所有可拷贝的固件源路径与目标路径
 EOF
@@ -588,6 +589,53 @@ extract_fw_module_from_input() {
     resolve_fw_module_name "$candidate"
 }
 
+# 列出固件源目录中将拷贝的相对路径（文件/符号链接，保留层级）
+list_firmware_relative_paths() {
+    local src_dir="$1"
+    [[ -d "$src_dir" ]] || return 1
+    (cd "$src_dir" && find . -mindepth 1 \( -type f -o -type l \) | sed 's|^\./||' | sort)
+}
+
+# 打印即将拷贝的固件清单（相对路径映射到目标目录）
+print_firmware_copy_plan() {
+    local src_dir="${SDK_ROOT_DIR}/${FW_SRC_BASE}/${FW_MODULE_NAME}"
+    local dest_rel="${DEVICE_BASE_PATH}/${MODULE_NAME}/wifi/firmware"
+    local rel count=0 dest_name dest_parent
+
+    echo ""
+    echo "将拷贝以下文件（保留源目录层级）:"
+    echo "  源:   ${FW_SRC_BASE}/${FW_MODULE_NAME}/"
+    echo "  目标: ${dest_rel}/"
+    echo ""
+
+    if [[ ! -d "$src_dir" ]]; then
+        log_warn "源目录不存在，无法列出文件: ${src_dir}"
+        return 1
+    fi
+
+    while IFS= read -r rel; do
+        [[ -n "$rel" ]] || continue
+        ((count++)) || true
+        printf "  %d. %s\n" "$count" "$rel"
+        dest_name="${rel##*/}"
+        dest_parent="${rel%/*}"
+        if [[ "$dest_parent" == "$rel" ]]; then
+            echo -e "     → ${CYAN}${dest_rel}/${GREEN}${dest_name}${NC}"
+        else
+            echo -e "     → ${CYAN}${dest_rel}/${dest_parent}/${GREEN}${dest_name}${NC}"
+        fi
+    done < <(list_firmware_relative_paths "$src_dir" || true)
+
+    if [[ "$count" -eq 0 ]]; then
+        log_warn "源目录无可拷贝文件: ${src_dir}"
+        return 1
+    fi
+
+    echo ""
+    log_info "共 ${count} 个文件"
+    return 0
+}
+
 # Normalize FW_MODULE_NAME to the actual directory name (case-insensitive)
 normalize_fw_module_name() {
     if [[ "$COPY_FIRMWARE" != true || -z "$FW_MODULE_NAME" ]]; then
@@ -621,6 +669,7 @@ prompt_firmware_copy() {
     if [[ "$COPY_FIRMWARE" == true ]]; then
         normalize_fw_module_name
         log_info "将拷贝 WiFi 固件: ${FW_MODULE_NAME} (-f/--copy-fw)"
+        print_firmware_copy_plan || true
         return 0
     fi
 
@@ -645,12 +694,12 @@ prompt_firmware_copy() {
 
     echo ""
     echo -e "  固件: ${CYAN}${resolved}${NC} (来自 PRODUCT_CHIPSET_NAME)"
-    echo -e "  源:   ${CYAN}${FW_SRC_BASE}/${resolved}/${NC}"
-    echo -e "  目标: ${CYAN}${DEVICE_BASE_PATH}/${MODULE_NAME}/wifi/firmware/${NC}"
-    echo ""
+    FW_MODULE_NAME="$resolved"
+    print_firmware_copy_plan || true
     echo -e -n "是否拷贝该 WiFi 固件？(Y/n): "
     read -r fw_confirm
     if [[ "$fw_confirm" == "n" || "$fw_confirm" == "N" ]]; then
+        FW_MODULE_NAME=""
         log_info "跳过 WiFi 固件拷贝"
         return 0
     fi
@@ -690,20 +739,13 @@ copy_wifi_firmware() {
         local item
         while IFS= read -r item; do
             [[ -n "$item" ]] && FW_COPIED_ITEMS+=("$item")
-        done < <(find "$src_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null \
-            || find "$src_dir" -mindepth 1 -maxdepth 1 -exec basename {} \; 2>/dev/null)
+        done < <(find "$src_dir" -mindepth 1 -maxdepth 1 -exec basename {} \; 2>/dev/null)
     fi
 
     if [[ ${#FW_COPIED_ITEMS[@]} -eq 0 ]]; then
-        log_warn "源目录无可拷贝文件: ${src_dir}"
+        log_warn "源目录无可拷贝条目: ${src_dir}"
     else
-        log_info "本次将拷贝 ${#FW_COPIED_ITEMS[@]} 个条目（编译成功后自动清理）"
-        if [[ "$VERBOSE" == true ]]; then
-            local name
-            for name in "${FW_COPIED_ITEMS[@]}"; do
-                log_debug "  - ${name}"
-            done
-        fi
+        log_info "本次将拷贝 ${#FW_COPIED_ITEMS[@]} 个顶层条目（编译成功后自动清理）"
     fi
 
     if [[ "$DRY_RUN" == true ]]; then
@@ -1250,7 +1292,7 @@ main() {
     
     echo ""
     echo -e "${CYAN}╔═══════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║      Feasycom 模组测试镜像编译工具 v1.3.0     ║${NC}"
+    echo -e "${CYAN}║      Feasycom 模组测试镜像编译工具 v1.3.1     ║${NC}"
     echo -e "${CYAN}╚═══════════════════════════════════════════════╝${NC}"
     echo ""
     
