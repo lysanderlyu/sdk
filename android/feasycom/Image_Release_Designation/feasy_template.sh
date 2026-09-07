@@ -1,7 +1,14 @@
 #!/bin/bash
+# =============================================================================
+# feasy_template.sh - 模组项目快速克隆/删除脚本 (v1.4)
+# 功能：按源项目拷贝 Android 工程目录，同步 u-boot/kernel 配置文件，并更新 AndroidProducts.mk
+# 替换规则：工程文件中的源项目名改为目标名；#include / /include/ 行保持原样
+# =============================================================================
+
 set -uo pipefail
 
 # ===================== Core Configuration (Exact match with your paths) =====================
+SCRIPT_VERSION="1.4"
 RK_BASE_DIR="device/rockchip/rk356x"
 UBOOT_DTS_BASE="u-boot/arch/arm/dts"
 UBOOT_DEFCONFIG_BASE="u-boot/configs"
@@ -10,6 +17,7 @@ KERNEL_CONFIG_BASE="kernel/arch/arm64/configs"
 
 # ===================== Usage Instructions =====================
 usage() {
+    echo "feasy_template.sh v${SCRIPT_VERSION}"
     echo "Usage: $0 <command> <source_project> <target_project>"
     echo "Commands:"
     echo "  clone   - Clone <source_project> as <target_project> (requires 3 params)"
@@ -53,6 +61,136 @@ find_actual_filepath() {
     local parent="$1"
     local name="$2"
     find "$parent" -maxdepth 1 -iname "$name" -type f -print -quit 2>/dev/null
+}
+
+# Collect unique source project identifiers (longest first for safe replacement)
+collect_source_identifiers() {
+    local source_actual_name="$1"
+    local source_upper="$2"
+    local -a candidates=()
+    local name
+
+    for name in "$source_actual_name" "$source_upper" \
+                "$(echo "$source_actual_name" | tr '[:lower:]' '[:upper:]')" \
+                "$(echo "$source_actual_name" | tr '[:upper:]' '[:lower:]')" \
+                "$(echo "$source_upper" | tr '[:lower:]' '[:upper:]')" \
+                "$(echo "$source_upper" | tr '[:upper:]' '[:lower:]')"; do
+        [[ -n "$name" ]] && candidates+=("$name")
+    done
+
+    # Deduplicate while preserving longest-first order
+    local -a unique=()
+    local candidate existing
+    for candidate in "${candidates[@]}"; do
+        local duplicate=0
+        for existing in "${unique[@]}"; do
+            if [[ "$candidate" == "$existing" ]]; then
+                duplicate=1
+                break
+            fi
+        done
+        [[ $duplicate -eq 0 ]] && unique+=("$candidate")
+    done
+
+    # Sort by length descending (longest match first)
+    local -a sorted=()
+    local max_len len
+    local -a remaining=("${unique[@]}")
+    while [[ ${#remaining[@]} -gt 0 ]]; do
+        max_len=0
+        local longest=""
+        local -a next_remaining=()
+        for candidate in "${remaining[@]}"; do
+            len=${#candidate}
+            if [[ $len -gt $max_len ]]; then
+                max_len=$len
+                longest="$candidate"
+            fi
+        done
+        sorted+=("$longest")
+        for candidate in "${remaining[@]}"; do
+            [[ "$candidate" != "$longest" ]] && next_remaining+=("$candidate")
+        done
+        remaining=("${next_remaining[@]}")
+    done
+
+    printf '%s\n' "${sorted[@]}"
+}
+
+# Replace source project identifiers with target in a single text file.
+# #include / /include/ lines are left untouched: cloning only renames the
+# project's own files, so included headers such as .dtsi still exist only
+# under the source name and must keep pointing there.
+replace_project_identifiers_in_file() {
+    local file="$1"
+    local target_proj="$2"
+    shift 2
+    local -a source_ids=("$@")
+    local tmp_file="${file}.feasy_template.tmp"
+
+    [[ -f "$file" ]] || return 0
+    [[ ${#source_ids[@]} -eq 0 ]] && return 0
+
+    FEASY_SOURCE_IDS="$(printf '%s\n' "${source_ids[@]}")" \
+    awk -v target="$target_proj" '
+    function lit_replace(s, from, to,    out, idx) {
+        out = ""
+        while ((idx = index(s, from)) > 0) {
+            out = out substr(s, 1, idx - 1) to
+            s = substr(s, idx + length(from))
+        }
+        return out s
+    }
+    BEGIN {
+        n = 0
+        cnt = split(ENVIRON["FEASY_SOURCE_IDS"], raw, "\n")
+        for (i = 1; i <= cnt; i++) {
+            if (raw[i] != "" && raw[i] != target) id[++n] = raw[i]
+        }
+    }
+    {
+        line = $0
+        if (line ~ /^[[:space:]]*#[[:space:]]*include/ || line ~ /^[[:space:]]*\/include\//) {
+            print line
+            next
+        }
+        for (i = 1; i <= n; i++) line = lit_replace(line, id[i], target)
+        print line
+    }
+    ' "$file" > "$tmp_file" || { rm -f "$tmp_file"; return 1; }
+
+    mv "$tmp_file" "$file"
+}
+
+# Replace identifiers across all common text files under a project directory
+replace_project_identifiers_in_tree() {
+    local root_dir="$1"
+    local target_proj="$2"
+    shift 2
+    local -a source_ids=("$@")
+
+    [[ -d "$root_dir" ]] || return 0
+
+    while IFS= read -r -d '' file; do
+        replace_project_identifiers_in_file "$file" "$target_proj" "${source_ids[@]}"
+    done < <(find "$root_dir" -type f \( \
+        -name "*.mk" -o -name "*.xml" -o -name "*.rc" -o -name "*.te" -o \
+        -name "*.cfg" -o -name "*.conf" -o -name "*.prop" -o -name "*.sh" -o \
+        -name "*.txt" -o -name "*.json" -o -name "*.bp" -o -name "*.dts" -o \
+        -name "*.dtsi" -o -name "*.ini" -o -name "*.hal" \
+    \) -print0 2>/dev/null)
+}
+
+# Copy a config file and replace embedded source project references
+copy_with_project_identifiers() {
+    local src="$1"
+    local dst="$2"
+    local target_proj="$3"
+    shift 3
+    local -a source_ids=("$@")
+
+    cp "$src" "$dst" || return 1
+    replace_project_identifiers_in_file "$dst" "$target_proj" "${source_ids[@]}"
 }
 
 # ===================== Global AndroidProducts.mk Management =====================
@@ -142,6 +280,7 @@ clone_project() {
     local source_proj="$2"
 
     # ========== Phase 1: Validate all prerequisites ==========
+    echo "feasy_template.sh v${SCRIPT_VERSION}"
     echo "========== Phase 1: Validation =========="
 
     # 1. Resolve source directory (case-insensitive)
@@ -201,28 +340,31 @@ clone_project() {
     echo ""
     echo "========== Phase 2: Execution =========="
 
+    local -a source_ids=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && source_ids+=("$line")
+    done < <(collect_source_identifiers "$source_actual_name" "$source_upper")
+
     # Copy source directory to target
     echo "[1/5] Copying ${source_actual_name} → ${target_proj}"
     rm -rf "$target_dir" 2>/dev/null
     cp -r "$source_dir" "$target_dir" || { echo "ERROR: Failed to copy source directory"; return 1; }
 
-    # Replace project name in .mk file content
-    echo "[2/5] Updating .mk file references"
+    # Replace project identifiers in all project text files
+    echo "[2/5] Updating project file references"
+    replace_project_identifiers_in_tree "$target_dir" "$target_proj" "${source_ids[@]}"
+
     if [[ -f "${target_dir}/${source_actual_name}.mk" ]]; then
-        sed -i "s/${source_actual_name}/${target_proj}/g" "${target_dir}/${source_actual_name}.mk" 2>/dev/null
         mv "${target_dir}/${source_actual_name}.mk" "${target_dir}/${target_proj}.mk" 2>/dev/null
     fi
 
-    # Update BoardConfig.mk with target identifier
-    sed -i "s/${source_upper}/${target_proj}/g" "${target_dir}/BoardConfig.mk" 2>/dev/null
-
-    # Copy u-boot/kernel config files
+    # Copy u-boot/kernel config files and replace embedded references
     echo "[3/5] Copying u-boot/kernel config files"
-    [[ -n "$uboot_dts_src" ]] && cp "$uboot_dts_src" "${UBOOT_DTS_BASE}/${target_proj}.dts"
-    [[ -n "$uboot_defconfig_src" ]] && cp "$uboot_defconfig_src" "${UBOOT_DEFCONFIG_BASE}/${target_proj}_defconfig"
-    [[ -n "$kernel_dts_src" ]] && cp "$kernel_dts_src" "${KERNEL_DTS_BASE}/${target_proj}-android.dts"
-    [[ -n "$kernel_defconfig_src" ]] && cp "$kernel_defconfig_src" "${KERNEL_CONFIG_BASE}/${target_proj}-android_defconfig"
-    [[ -n "$kernel_dts_tmp_domain_src" ]] && cp "$kernel_dts_tmp_domain_src" "${KERNEL_DTS_BASE}/.${target_proj}-android.dtb.dts.tmp.domain"
+    [[ -n "$uboot_dts_src" ]] && copy_with_project_identifiers "$uboot_dts_src" "${UBOOT_DTS_BASE}/${target_proj}.dts" "$target_proj" "${source_ids[@]}"
+    [[ -n "$uboot_defconfig_src" ]] && copy_with_project_identifiers "$uboot_defconfig_src" "${UBOOT_DEFCONFIG_BASE}/${target_proj}_defconfig" "$target_proj" "${source_ids[@]}"
+    [[ -n "$kernel_dts_src" ]] && copy_with_project_identifiers "$kernel_dts_src" "${KERNEL_DTS_BASE}/${target_proj}-android.dts" "$target_proj" "${source_ids[@]}"
+    [[ -n "$kernel_defconfig_src" ]] && copy_with_project_identifiers "$kernel_defconfig_src" "${KERNEL_CONFIG_BASE}/${target_proj}-android_defconfig" "$target_proj" "${source_ids[@]}"
+    [[ -n "$kernel_dts_tmp_domain_src" ]] && copy_with_project_identifiers "$kernel_dts_tmp_domain_src" "${KERNEL_DTS_BASE}/.${target_proj}-android.dtb.dts.tmp.domain" "$target_proj" "${source_ids[@]}"
 
     # Append BSP metadata to .mk file
     echo "[4/5] Appending BSP metadata"
@@ -250,6 +392,8 @@ clone_project() {
 # ===================== Delete Project (Delete files + Remove entries) =====================
 delete_project() {
     local target_proj="$1"
+
+    echo "feasy_template.sh v${SCRIPT_VERSION}"
 
     # 0. Remove entries from global AndroidProducts.mk
     remove_from_global_android_products "$target_proj"
