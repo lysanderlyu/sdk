@@ -714,10 +714,11 @@ generate_changelog_template() {
     local today_date
     today_date="$DATE_FORMATTED"
 
-    # 如果已有 CHANGELOG_TEMP.md 且已 CHECKED，直接复用
+    # 如果已有 CHANGELOG_TEMP.md 且已 CHECKED，清理占位符后复用
     if [[ -f "$temp_file" ]]; then
         if grep -q "^${CHECKED_MARKER}$" "$temp_file" 2>/dev/null; then
-            log_info "发现已审核通过的 CHANGELOG_TEMP.md，直接使用"
+            sanitize_changelog_placeholders "$temp_file"
+            log_info "发现已审核通过的 CHANGELOG_TEMP.md，已清理占位符后使用"
             echo "────────────────────────────────────────"
             cat "$temp_file"
             echo "────────────────────────────────────────"
@@ -771,6 +772,7 @@ TEMPLATE_EOF
         echo "---"
         echo ""
         echo "> ⚠️ 请开发者人工审核以上 CHANGELOG 内容并完善，确认无误后将下方标记改为 yes"
+        echo "> 确认后、上传前将自动删除「（请完善）」；未填写任何内容的分类会自动补上一行空行和「- 无」"
         echo "${UNCHECKED_MARKER}"
         echo "> 编辑完成后保存文件，重新执行本脚本即可继续。"
     } >> "$temp_file"
@@ -779,6 +781,7 @@ TEMPLATE_EOF
     echo ""
     echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${YELLOW}║  请完善发行说明内容，并将 CHECKED 标记改为 yes 后重试        ║${NC}"
+    echo -e "${YELLOW}║  确认后将自动去掉「（请完善）」；空分类会补上「- 无」        ║${NC}"
     echo -e "${YELLOW}║                                                              ║${NC}"
     echo -e "${YELLOW}║  文件: ${temp_file}${NC}"
     echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════╝${NC}"
@@ -815,7 +818,8 @@ CHG_EOF
 
         # 重新检查审核状态
         if grep -q "^${CHECKED_MARKER}$" "$temp_file" 2>/dev/null; then
-            log_info "✅ 发行说明审核通过！"
+            sanitize_changelog_placeholders "$temp_file"
+            log_info "✅ 发行说明审核通过，已清理占位符"
             return 0
         else
             log_error "发行说明仍未审核确认"
@@ -832,6 +836,91 @@ CHG_EOF
     fi
 }
 
+# ===================== CHANGELOG 占位符清理 =====================
+# CHECKED: yes 之后、上传之前：删除「（请完善）」；空分类补上「- 无」
+sanitize_changelog_placeholders() {
+    local file="$1"
+    local tmp
+
+    if [[ ! -f "$file" ]]; then
+        return 0
+    fi
+
+    tmp=$(mktemp)
+    awk '
+    function rtrim(s) {
+        sub(/[[:space:]]+$/, "", s)
+        return s
+    }
+    function strip_placeholder(s) {
+        gsub(/（请完善）/, "", s)
+        gsub(/\(请完善\)/, "", s)
+        return rtrim(s)
+    }
+    function is_tracked_heading(s) {
+        return (s ~ /^### Added[[:space:]]*$/ ||
+                s ~ /^### Changed[[:space:]]*$/ ||
+                s ~ /^### Fixed[[:space:]]*$/ ||
+                s ~ /^### Known Issues[[:space:]]*$/)
+    }
+    function is_placeholder_item(s,    t) {
+        t = strip_placeholder(s)
+        sub(/^[[:space:]]+/, "", t)
+        if (t == "" || t == "-") return 1
+        if (t ~ /^-[[:space:]]*(.+[[:space:]]+)?(新功能描述|功能变更描述|问题修复描述|已知问题描述)[[:space:]]*$/) return 1
+        return 0
+    }
+    function is_real_item(s,    t) {
+        t = strip_placeholder(s)
+        if (t !~ /^[[:space:]]*-[[:space:]]/) return 0
+        return !is_placeholder_item(t)
+    }
+    function flush_section(    i, has, line) {
+        if (section_name == "") return
+        print section_name
+        has = 0
+        for (i = 1; i <= nbody; i++) {
+            if (is_real_item(body[i])) has = 1
+        }
+        if (!has) {
+            print ""
+            print "- 无"
+            print ""
+        } else {
+            for (i = 1; i <= nbody; i++) {
+                line = strip_placeholder(body[i])
+                if (is_placeholder_item(body[i]) && body[i] ~ /^[[:space:]]*-/) continue
+                print line
+            }
+        }
+        section_name = ""
+        nbody = 0
+        delete body
+    }
+    {
+        if (is_tracked_heading($0)) {
+            flush_section()
+            section_name = $0
+            nbody = 0
+            next
+        }
+        if (section_name != "" && ($0 ~ /^### / || $0 ~ /^## / || $0 ~ /^---[[:space:]]*$/)) {
+            flush_section()
+        }
+        if (section_name != "") {
+            nbody++
+            body[nbody] = $0
+            next
+        }
+        print $0
+    }
+    END { flush_section() }
+    ' "$file" > "$tmp"
+
+    mv "$tmp" "$file"
+    log_info "已清理 CHANGELOG 占位符「（请完善）」；空白分类已填入「- 无」"
+}
+
 # ===================== CHANGELOG 提取函数 =====================
 # 从 CHANGELOG_TEMP.md 中提取当前版本的条目（去掉 CHECKED 标记和提示说明）
 extract_current_version_entry() {
@@ -845,6 +934,7 @@ extract_current_version_entry() {
     # 移除 CHECKED 标记行、警告说明行，然后压缩多余空行
     sed -e '/^CHECKED:/d' \
         -e '/^> ⚠️/d' \
+        -e '/^> 确认后/d' \
         -e '/^> 编辑完成后/d' \
         -e '/^> $/d' \
         -e '/^---$/d' \
@@ -1250,7 +1340,7 @@ main() {
 
     echo ""
     echo -e "${CYAN}╔══════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║     Feasycom 模组测试镜像上传工具 v1.0   ║${NC}"
+    echo -e "${CYAN}║     Feasycom 模组测试镜像上传工具 v1.2   ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════╝${NC}"
     echo ""
 
