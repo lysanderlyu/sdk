@@ -46,6 +46,9 @@ TEMP_DIR=""
 ZIP_FILE=""
 # FTP 连接模式（自动判定：true=lftp, false=本地挂载）
 FTP_USE_LFTP=false
+# 仅在实际上传成功后由 cleanup 删除 CHANGELOG_TEMP.md。
+# 不能用 exit 0 判断：-h、用户取消路径确认、版本冲突取消都是 0，否则会误删已填写的发行说明。
+UPLOAD_SUCCEEDED=false
 
 # ===================== 颜色输出 =====================
 RED='\033[0;31m'
@@ -704,6 +707,50 @@ check_version_conflict() {
     log_info "用户确认继续上传"
 }
 
+# 识别 CHECKED: yes（允许空白、大小写、Windows CRLF）
+changelog_is_checked() {
+    local file="$1"
+    [[ -f "$file" ]] || return 1
+    tr -d '\r' < "$file" | grep -qiE '^[[:space:]]*CHECKED:[[:space:]]*yes[[:space:]]*$'
+}
+
+# 交互或提示用户完成 CHECKED 审核；通过后清理占位符
+review_existing_changelog() {
+    local temp_file="$1"
+
+    echo "────────────────────────────────────────"
+    cat "$temp_file"
+    echo "────────────────────────────────────────"
+
+    if changelog_is_checked "$temp_file"; then
+        sanitize_changelog_placeholders "$temp_file"
+        log_info "✅ 发行说明审核通过，已清理占位符"
+        return 0
+    fi
+
+    if [[ -t 0 ]]; then
+        log_info "按 Enter 键打开编辑器进行编辑，或按 Ctrl+C 取消..."
+        read -r
+        ${EDITOR:-vi} "$temp_file"
+
+        if changelog_is_checked "$temp_file"; then
+            sanitize_changelog_placeholders "$temp_file"
+            log_info "✅ 发行说明审核通过，已清理占位符"
+            return 0
+        fi
+        log_error "发行说明仍未审核确认"
+        log_error "请编辑 ${temp_file} 将 CHECKED: no 改为 CHECKED: yes 后重新执行"
+        exit 1
+    fi
+
+    log_error "非交互模式，无法自动打开编辑器审核 CHANGELOG"
+    log_error "请使用以下任一方式解决："
+    log_error "  1. 添加 -s 选项跳过审核：$0 -s <镜像文件>"
+    log_error "  2. 设置环境变量：export FEASY_FORCE_SKIP=1"
+    log_error "  3. 外部编辑后重新执行：编辑 ${temp_file} 后重新运行"
+    exit 1
+}
+
 # ===================== 生成 CHANGELOG 模板 =====================
 generate_changelog_template() {
     log_step "生成发行说明模板 (CHANGELOG_TEMP.md)"
@@ -714,9 +761,9 @@ generate_changelog_template() {
     local today_date
     today_date="$DATE_FORMATTED"
 
-    # 如果已有 CHANGELOG_TEMP.md 且已 CHECKED，清理占位符后复用
+    # 已有草稿一律保留：未勾选 CHECKED 时不得重建，否则会清掉已填写的发行内容
     if [[ -f "$temp_file" ]]; then
-        if grep -q "^${CHECKED_MARKER}$" "$temp_file" 2>/dev/null; then
+        if changelog_is_checked "$temp_file"; then
             sanitize_changelog_placeholders "$temp_file"
             log_info "发现已审核通过的 CHANGELOG_TEMP.md，已清理占位符后使用"
             echo "────────────────────────────────────────"
@@ -724,8 +771,12 @@ generate_changelog_template() {
             echo "────────────────────────────────────────"
             return 0
         fi
-        log_warn "发现未审核的 CHANGELOG_TEMP.md，将重新生成"
-        rm -f "$temp_file"
+        log_warn "发现未审核的 CHANGELOG_TEMP.md，保留已有内容（不会覆盖）"
+        if ! grep -q "\[${VERSION}\]" "$temp_file" 2>/dev/null; then
+            log_warn "草稿中的版本号与当前镜像 ${VERSION} 可能不一致，请在编辑器中确认"
+        fi
+        review_existing_changelog "$temp_file"
+        return 0
     fi
 
     log_info "基于最近的 git 提交记录生成模板..."
@@ -812,20 +863,8 @@ CHG_EOF
 
     # 交互式终端 —— 自动打开编辑器
     if [[ -t 0 ]]; then
-        log_info "按 Enter 键打开编辑器进行编辑，或按 Ctrl+C 取消..."
-        read -r
-        ${EDITOR:-vi} "$temp_file"
-
-        # 重新检查审核状态
-        if grep -q "^${CHECKED_MARKER}$" "$temp_file" 2>/dev/null; then
-            sanitize_changelog_placeholders "$temp_file"
-            log_info "✅ 发行说明审核通过，已清理占位符"
-            return 0
-        else
-            log_error "发行说明仍未审核确认"
-            log_error "请编辑 ${temp_file} 将 CHECKED: no 改为 CHECKED: yes 后重新执行"
-            exit 1
-        fi
+        review_existing_changelog "$temp_file"
+        return 0
     else
         log_error "非交互模式，无法自动打开编辑器审核 CHANGELOG"
         log_error "请使用以下任一方式解决："
@@ -837,7 +876,9 @@ CHG_EOF
 }
 
 # ===================== CHANGELOG 占位符清理 =====================
-# CHECKED: yes 之后、上传之前：删除「（请完善）」；空分类补上「- 无」
+# CHECKED: yes 之后、上传之前：删除模板占位行；整节为空时补上「- 无」
+# 判定原则：分类下除模板原句（形如「- xxx描述（请完善）」）和纯空行外，
+# 其余一律视为开发者写的正文，包括空行、缩进、非「-」开头的段落，原样保留。
 sanitize_changelog_placeholders() {
     local file="$1"
     local tmp
@@ -857,30 +898,25 @@ sanitize_changelog_placeholders() {
         gsub(/\(请完善\)/, "", s)
         return rtrim(s)
     }
+    function is_blank(s) {
+        return s ~ /^[[:space:]]*$/
+    }
     function is_tracked_heading(s) {
         return (s ~ /^### Added[[:space:]]*$/ ||
                 s ~ /^### Changed[[:space:]]*$/ ||
                 s ~ /^### Fixed[[:space:]]*$/ ||
                 s ~ /^### Known Issues[[:space:]]*$/)
     }
-    function is_placeholder_item(s,    t) {
-        t = strip_placeholder(s)
-        sub(/^[[:space:]]+/, "", t)
-        if (t == "" || t == "-") return 1
-        if (t ~ /^-[[:space:]]*(.+[[:space:]]+)?(新功能描述|功能变更描述|问题修复描述|已知问题描述)[[:space:]]*$/) return 1
-        return 0
-    }
-    function is_real_item(s,    t) {
-        t = strip_placeholder(s)
-        if (t !~ /^[[:space:]]*-[[:space:]]/) return 0
-        return !is_placeholder_item(t)
+    # 仅未经编辑的模板原句算占位符：必须带「（请完善）」后缀
+    function is_placeholder_item(s) {
+        return s ~ /^[[:space:]]*-.*(新功能描述|功能变更描述|问题修复描述|已知问题描述)[[:space:]]*(（请完善）|\(请完善\))[[:space:]]*$/
     }
     function flush_section(    i, has, line) {
         if (section_name == "") return
         print section_name
         has = 0
         for (i = 1; i <= nbody; i++) {
-            if (is_real_item(body[i])) has = 1
+            if (!is_blank(body[i]) && !is_placeholder_item(body[i])) has = 1
         }
         if (!has) {
             print ""
@@ -888,8 +924,9 @@ sanitize_changelog_placeholders() {
             print ""
         } else {
             for (i = 1; i <= nbody; i++) {
-                line = strip_placeholder(body[i])
-                if (is_placeholder_item(body[i]) && body[i] ~ /^[[:space:]]*-/) continue
+                if (is_placeholder_item(body[i])) continue
+                line = body[i]
+                if (line ~ /（请完善）/ || line ~ /\(请完善\)/) line = strip_placeholder(line)
                 print line
             }
         }
@@ -931,17 +968,18 @@ extract_current_version_entry() {
         return
     fi
 
-    # 移除 CHECKED 标记行、警告说明行，然后压缩多余空行
-    sed -e '/^CHECKED:/d' \
-        -e '/^> ⚠️/d' \
-        -e '/^> 确认后/d' \
-        -e '/^> 编辑完成后/d' \
-        -e '/^> $/d' \
-        -e '/^---$/d' \
-        "$source_file" \
-        | sed -e '/^[[:space:]]*$/{N;/^\n$/d;}' \
-        | sed -e :a -e '/^\n*$/{$d;N;ba}' \
-        | sed -e '1{/^$/d}'
+    # 只去掉审核标记和提示语，保留正文与 ---；勿用会吞掉全文的 trailing-blank sed
+    tr -d '\r' < "$source_file" \
+        | sed -e '/^[[:space:]]*CHECKED:/d' \
+              -e '/^> ⚠️/d' \
+              -e '/^> 确认后/d' \
+              -e '/^> 编辑完成后/d' \
+              -e '/^>[[:space:]]*$/d' \
+        | awk '
+            NF { empty = 0; print; next }
+            { if (empty == 0) print; empty = 1 }
+            END { }
+          '
 }
 
 # ===================== 打包镜像 =====================
@@ -999,7 +1037,10 @@ package_image() {
         local changelog_file
         changelog_file=$(basename "$global_changelog_path")
         remote_changelog_tmp="${TEMP_DIR}/remote_changelog.md"
-        if lftp_exec "cd ${changelog_dir} && get ${changelog_file} -o ${remote_changelog_tmp}"; then
+        rm -f "$remote_changelog_tmp"
+        # lftp 在 get 失败时仍可能返回 0，必须确认本地确实下到了非空文件，否则会把 FTP 上的历史发行说明覆盖成仅当前版本
+        if lftp_exec "cd ${changelog_dir} && get ${changelog_file} -o ${remote_changelog_tmp}" \
+            && [[ -s "$remote_changelog_tmp" ]]; then
             log_info "发现远程已有全局 CHANGELOG.md，追加当前发行说明..."
             {
                 echo "$current_entry"
@@ -1308,8 +1349,8 @@ cleanup() {
     local exit_code=$?
 
     echo ""
-    # 只在成功时清理 CHANGELOG_TEMP.md
-    if [[ $exit_code -eq 0 ]]; then
+    # 只在实际上传成功后清理草稿；help / 用户取消 / dry-run 都要保留已填写内容
+    if [[ $exit_code -eq 0 && "$UPLOAD_SUCCEEDED" == true && "$DRY_RUN" != true ]]; then
         if [[ -f "${SDK_ROOT_DIR}/${CHANGELOG_TEMP}" ]]; then
             rm -f "${SDK_ROOT_DIR}/${CHANGELOG_TEMP}"
             log_info "已清理: ${CHANGELOG_TEMP}"
@@ -1340,7 +1381,7 @@ main() {
 
     echo ""
     echo -e "${CYAN}╔══════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║     Feasycom 模组测试镜像上传工具 v1.2   ║${NC}"
+    echo -e "${CYAN}║     Feasycom 模组测试镜像上传工具 v1.3   ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════╝${NC}"
     echo ""
 
@@ -1481,6 +1522,8 @@ main() {
     if [[ "$DRY_RUN" == true ]]; then
         echo -e "${YELLOW}[模拟模式] 以上操作未实际执行${NC}"
         echo ""
+    else
+        UPLOAD_SUCCEEDED=true
     fi
 }
 
