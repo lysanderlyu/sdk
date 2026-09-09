@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# feasy_template.sh - 模组项目快速克隆/删除脚本 (v1.4)
+# feasy_template.sh - 模组项目快速克隆/删除脚本 (v1.5)
 # 功能：按源项目拷贝 Android 工程目录，同步 u-boot/kernel 配置文件，并更新 AndroidProducts.mk
 # 替换规则：工程文件中的源项目名改为目标名；#include / /include/ 行保持原样
 # =============================================================================
@@ -8,7 +8,7 @@
 set -uo pipefail
 
 # ===================== Core Configuration (Exact match with your paths) =====================
-SCRIPT_VERSION="1.4"
+SCRIPT_VERSION="1.5"
 RK_BASE_DIR="device/rockchip/rk356x"
 UBOOT_DTS_BASE="u-boot/arch/arm/dts"
 UBOOT_DEFCONFIG_BASE="u-boot/configs"
@@ -131,8 +131,14 @@ replace_project_identifiers_in_file() {
     [[ -f "$file" ]] || return 0
     [[ ${#source_ids[@]} -eq 0 ]] && return 0
 
+    # Skip binary files (NUL in first 8KiB). Avoids corrupting non-text *.cfg etc.
+    if [[ $(LC_ALL=C head -c 8192 "$file" 2>/dev/null | LC_ALL=C tr -cd '\0' | wc -c) -gt 0 ]]; then
+        return 0
+    fi
+
+    # LC_ALL=C: byte-oriented I/O so non-UTF-8 text (e.g. GBK) does not warn/fail.
     FEASY_SOURCE_IDS="$(printf '%s\n' "${source_ids[@]}")" \
-    awk -v target="$target_proj" '
+    LC_ALL=C awk -v target="$target_proj" '
     function lit_replace(s, from, to,    out, idx) {
         out = ""
         while ((idx = index(s, from)) > 0) {
