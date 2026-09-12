@@ -95,7 +95,7 @@ usage() {
 
 示例:
     $0 -h                             显示此帮助信息
-    $0 -m BW8205                      一键编译 Debug 版 BW8205 固件（默认，source + lunch + build.sh -UKAup）
+    $0 -m BW8205                      一键编译 Debug 版 BW8205 固件（默认，source + lunch + build.sh -UKAu）
     $0 -m BW8205 -d                   编译 Debug 调试版 BW8205 固件
     $0 -m BW8205 -r                   编译 Release 发行版 BW8205 固件（检查 Git 未提交修改）
     $0 -m BW8205 -u                   仅编译 U-Boot（build.sh -Uu，打包 update.img 但不拷贝发行镜像）
@@ -107,7 +107,7 @@ usage() {
     $0 -m BW8205 --skip-fw            编译时不拷贝 WiFi 固件
 
 说明:
-    默认全量编译: build.sh -UKAup（U-Boot + Kernel + Android + update.img + IMAGE 打包）
+    默认全量编译: build.sh -UKAu（U-Boot + Kernel + Android + update.img，不走 IMAGE/-p 发行拷贝）
     -u / -k / -a 互斥，且与全量流程互斥；仅编译模式会打包 update.img 并提示路径，但不拷贝到发行目录、不生成上传相关文件。
 
     Debug调试版命名:   [项目主控_芯片组]_[系统平台]_[模组芯片]_[模组型号]_[版本号]_Debug_[年月日].[时分].img
@@ -463,7 +463,7 @@ describe_build_scope() {
         uboot)   echo "仅 U-Boot (build.sh -Uu)" ;;
         kernel)  echo "仅 Kernel (build.sh -Ku)" ;;
         android) echo "仅 Android (build.sh -Au)" ;;
-        *)       echo "全量 (build.sh -UKAup)" ;;
+        *)       echo "全量 (build.sh -UKAu)" ;;
     esac
 }
 
@@ -921,9 +921,9 @@ run_build() {
             build_args="-Au"
             ;;
         *)
-            # 全量：U-Boot + Kernel + Android + update.img + IMAGE 打包
+            # 全量：U-Boot + Kernel + Android + update.img，不走 IMAGE/-p 发行拷贝
             # Debug/Release 传参相同，Release 额外在 check_git_status 中校验干净工作区
-            build_args="-UKAup"
+            build_args="-UKAu"
             ;;
     esac
     
@@ -1011,14 +1011,9 @@ find_generated_update_img() {
     GENERATED_UPDATE_IMG=""
     local found=""
 
-    # 全量带 -p，结果在 IMAGE/；仅编译走 -u 不带 -p，结果在 rockdev/
-    if [[ "$BUILD_SCOPE" == "all" ]]; then
-        found=$(find_image_dir_update_img || true)
-        [[ -z "$found" ]] && found=$(find_rockdev_update_img || true)
-    else
-        found=$(find_rockdev_update_img || true)
-        [[ -z "$found" ]] && found=$(find_image_dir_update_img || true)
-    fi
+    # feasy_build.sh 不传 -p，update.img 在 rockdev/；兼容旧的 IMAGE/ 产物
+    found=$(find_rockdev_update_img || true)
+    [[ -z "$found" ]] && found=$(find_image_dir_update_img || true)
 
     if [[ -n "$found" ]]; then
         GENERATED_UPDATE_IMG="$found"
@@ -1292,7 +1287,7 @@ main() {
     
     echo ""
     echo -e "${CYAN}╔═══════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║      Feasycom 模组测试镜像编译工具 v1.3.1     ║${NC}"
+    echo -e "${CYAN}║      Feasycom 模组测试镜像编译工具 v1.3.2     ║${NC}"
     echo -e "${CYAN}╚═══════════════════════════════════════════════╝${NC}"
     echo ""
     
