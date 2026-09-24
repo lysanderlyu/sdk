@@ -1,9 +1,10 @@
 #!/bin/bash
 # =============================================================================
-# feasy_upload.sh - 模组测试镜像自动化上传脚本 (v2.2)
+# feasy_upload.sh - 模组测试镜像自动化上传脚本 (v2.3)
 # 功能：自动解析镜像名、生成 Release Notes、打包 .zip、上传、追加 CHANGELOG
 # 安全机制：禁止覆盖已有文件、限制操作路径、镜像名合法性检查、CHANGELOG 审核门禁
 # FTP：自动检测本地挂载或 lftp 连接 ${FTP_HOST:-192.168.0.71}:${FTP_PORT:-20249}
+# 持久章节：产线/测试部注意事项位于各版本 ## [Vx.y.z] 之下，每次上传从上一次 CHANGELOG 继承
 # =============================================================================
 
 set -euo pipefail
@@ -25,11 +26,16 @@ SDK_ROOT_DIR="$(cd "$(dirname "$0")" && pwd 2>/dev/null || echo ".")"
 CHANGELOG_FILE="CHANGELOG.md"
 # 临时 CHANGELOG 文件名（位于 SDK 根目录）
 CHANGELOG_TEMP="CHANGELOG_TEMP.md"
+# 持久章节：位于各版本 ## [Vx.y.z] 之下，每次上传从上一次全局 CHANGELOG 继承，无需重复填写
+PERSISTENT_SECTION_1="产线自动化测试注意事项说明"
+PERSISTENT_SECTION_2="测试部使用镜像注意事项说明"
 # 审核标记
 CHECKED_MARKER="CHECKED: yes"
 UNCHECKED_MARKER="CHECKED: no"
 # 日志文件（基于 SDK 根目录，避免 CWD 变化导致路径失效）
 LOG_FILE="${SDK_ROOT_DIR}/feasy_upload.log"
+# 上一次全局 CHANGELOG 本地缓存（模板生成与打包共用）
+PREVIOUS_CHANGELOG_CACHE="${SDK_ROOT_DIR}/.feasy_prev_changelog.md"
 
 # ===================== 全局变量 =====================
 DRY_RUN=false
@@ -49,6 +55,8 @@ FTP_USE_LFTP=false
 # 仅在实际上传成功后由 cleanup 删除 CHANGELOG_TEMP.md。
 # 不能用 exit 0 判断：-h、用户取消路径确认、版本冲突取消都是 0，否则会误删已填写的发行说明。
 UPLOAD_SUCCEEDED=false
+# 是否已成功拉取到上一次全局 CHANGELOG
+HAS_PREVIOUS_CHANGELOG=false
 
 # ===================== 颜色输出 =====================
 RED='\033[0;31m'
@@ -119,6 +127,10 @@ FTP 服务器:
     1. 镜像名解析与校验              4. 审核发行说明 (CHECKED: yes)
     2. 路径安全检查                  5. 打包 .zip (内含镜像 + CHANGELOG.md)
     3. 基于 git 提交自动生成 CHANGELOG  6. lftp/cp 上传到 FTP、更新全局 CHANGELOG
+
+CHANGELOG 持久章节（位于 ## [版本] 之下，自动继承上一次内容）:
+    ### ${PERSISTENT_SECTION_1}
+    ### ${PERSISTENT_SECTION_2}
 
 镜像命名规范:
     Debug:   [主控_芯片组]_[系统平台]_[模组芯片]_[模组型号]_[版本号]_Debug_[年月日].[时分].img
@@ -707,6 +719,382 @@ check_version_conflict() {
     log_info "用户确认继续上传"
 }
 
+# ===================== 全局 CHANGELOG 路径 =====================
+# 全局 CHANGELOG.md 位于版本目录的上一级（Debug/ 或 Release/）
+resolve_global_changelog_path() {
+    local target_path="$1"
+    local global_parent
+    global_parent=$(dirname "${target_path%/}")
+    echo "${global_parent}/${CHANGELOG_FILE}"
+}
+
+# 拉取上一次全局 CHANGELOG 到本地缓存，供模板继承与打包合并共用
+fetch_previous_changelog() {
+    local target_path="$1"
+    local global_changelog_path
+    global_changelog_path=$(resolve_global_changelog_path "$target_path")
+
+    HAS_PREVIOUS_CHANGELOG=false
+    rm -f "$PREVIOUS_CHANGELOG_CACHE"
+
+    log_step "拉取上一次 CHANGELOG（持久章节继承）"
+
+    if [[ "$FTP_USE_LFTP" == true ]]; then
+        local changelog_dir
+        changelog_dir=$(dirname "$global_changelog_path")
+        local changelog_file
+        changelog_file=$(basename "$global_changelog_path")
+        if lftp_exec "cd ${changelog_dir} && get ${changelog_file} -o ${PREVIOUS_CHANGELOG_CACHE}" \
+            && [[ -s "$PREVIOUS_CHANGELOG_CACHE" ]]; then
+            HAS_PREVIOUS_CHANGELOG=true
+            log_info "已拉取远程全局 CHANGELOG.md，将继承持久章节"
+        else
+            rm -f "$PREVIOUS_CHANGELOG_CACHE"
+            log_info "远程无全局 CHANGELOG.md（首次发行）"
+        fi
+    else
+        if [[ -f "$global_changelog_path" && -s "$global_changelog_path" ]]; then
+            cp "$global_changelog_path" "$PREVIOUS_CHANGELOG_CACHE"
+            HAS_PREVIOUS_CHANGELOG=true
+            log_info "已读取本地全局 CHANGELOG.md，将继承持久章节"
+        else
+            log_info "本地无全局 CHANGELOG.md（首次发行）"
+        fi
+    fi
+}
+
+# 提取一节持久注意事项；优先 ###（版本内），兼容旧的顶层 ##；输出统一为 ###
+extract_persistent_section() {
+    local file="$1"
+    local title="$2"
+    [[ -f "$file" ]] || return 1
+    awk -v title="$title" '
+        BEGIN { found = 0; level = "" }
+        $0 ~ ("^###[[:space:]]+" title "[[:space:]]*$") {
+            found = 1
+            level = "###"
+            print "### " title
+            next
+        }
+        $0 ~ ("^##[[:space:]]+" title "[[:space:]]*$") {
+            found = 1
+            level = "##"
+            print "### " title
+            next
+        }
+        found && level == "###" && (/^###[[:space:]]/ || /^##[[:space:]]/ || /^---[[:space:]]*$/) { exit }
+        found && level == "##" && (/^##[[:space:]]/ || /^---[[:space:]]*$/) { exit }
+        found { print }
+    ' "$file"
+}
+
+# 从文件提取两个持久章节（含 ### 标题）；若某节缺失则跳过该节
+extract_persistent_sections() {
+    local file="$1"
+    local s1="" s2=""
+    [[ -f "$file" ]] || return 1
+    s1=$(extract_persistent_section "$file" "$PERSISTENT_SECTION_1") || true
+    s2=$(extract_persistent_section "$file" "$PERSISTENT_SECTION_2") || true
+    if [[ -z "$s1" && -z "$s2" ]]; then
+        return 1
+    fi
+    {
+        [[ -n "$s1" ]] && printf '%s\n' "$s1"
+        [[ -n "$s1" && -n "$s2" ]] && echo ""
+        [[ -n "$s2" ]] && printf '%s\n' "$s2"
+    }
+    return 0
+}
+
+# 持久章节预设条目（开发者将 xx 换成实际说明；未改则审核后变为「无特殊说明」）
+PERSISTENT_PRESET_LINE_1="1. 模组上电下电说明：xx"
+PERSISTENT_PRESET_LINE_2="2. WiFI测试说明：xx"
+PERSISTENT_PRESET_LINE_3="3. 蓝牙测试说明：xx"
+
+# 单个持久章节的预设正文（不含标题）
+persistent_section_preset_body() {
+    printf '%s\n' \
+        "$PERSISTENT_PRESET_LINE_1" \
+        "$PERSISTENT_PRESET_LINE_2" \
+        "$PERSISTENT_PRESET_LINE_3"
+}
+
+# 带标题的完整持久章节块
+format_persistent_section() {
+    local title="$1"
+    printf '### %s\n\n' "$title"
+    persistent_section_preset_body
+    printf '\n'
+}
+
+# 占位模板（首次发行或旧 CHANGELOG 尚无这两节时使用）
+default_persistent_sections() {
+    format_persistent_section "$PERSISTENT_SECTION_1"
+    format_persistent_section "$PERSISTENT_SECTION_2"
+}
+
+# 判断持久章节正文是否「无实际说明」（仅 xx / 无特殊说明 / 空）
+persistent_section_is_empty_content() {
+    local section="$1"
+    local tmp
+    tmp=$(mktemp)
+    printf '%s\n' "$section" > "$tmp"
+    # 去掉标题与空行后，若没有任何「已填写」的预设行/额外正文，则视为空
+    if awk '
+        /^### / || /^## / { next }
+        /^[[:space:]]*$/ { next }
+        /^[[:space:]]*[0-9]+\.[[:space:]]+(模组上电下电说明|WiFI测试说明|蓝牙测试说明)[：:][[:space:]]*xx[[:space:]]*$/ { next }
+        /^[[:space:]]*[0-9]+\.[[:space:]]+(模组上电下电说明|WiFI测试说明|蓝牙测试说明)[：:][[:space:]]*无特殊说明[[:space:]]*$/ { next }
+        /^[[:space:]]*[0-9]+\.[[:space:]]+(模组上电下电说明|WiFI测试说明|蓝牙测试说明)[：:][[:space:]]*$/ { next }
+        /^[[:space:]]*无特殊说明[[:space:]]*$/ { next }
+        /^[[:space:]]*-[[:space:]]*(（请完善）|\(请完善\))[[:space:]]*$/ { next }
+        { found = 1; exit }
+        END { exit found ? 1 : 0 }
+    ' "$tmp"; then
+        rm -f "$tmp"
+        return 0
+    fi
+    rm -f "$tmp"
+    return 1
+}
+
+# Added / Changed / Fixed / Known Issues 分类是否无实际内容（- 无 / 请完善占位）
+category_section_is_empty_content() {
+    local section="$1"
+    local tmp
+    tmp=$(mktemp)
+    printf '%s\n' "$section" > "$tmp"
+    if awk '
+        /^### / || /^## / { next }
+        /^[[:space:]]*$/ { next }
+        /^[[:space:]]*-[[:space:]]*无[[:space:]]*$/ { next }
+        /^[[:space:]]*-.*(新功能描述|功能变更描述|问题修复描述|已知问题描述)[[:space:]]*(（请完善）|\(请完善\))[[:space:]]*$/ { next }
+        /^[[:space:]]*-[[:space:]]*(（请完善）|\(请完善\))[[:space:]]*$/ { next }
+        { found = 1; exit }
+        END { exit found ? 1 : 0 }
+    ' "$tmp"; then
+        rm -f "$tmp"
+        return 0
+    fi
+    rm -f "$tmp"
+    return 1
+}
+
+# 分类占位模板（首次或上一次无实质内容时）
+default_category_section() {
+    local title="$1"
+    local placeholder="$2"
+    printf '### %s\n\n- %s\n' "$title" "$placeholder"
+}
+
+default_category_sections() {
+    default_category_section "Added" "${CHIPSET} ${MODULE_MODEL} 新功能描述（请完善）"
+    echo ""
+    default_category_section "Changed" "功能变更描述（请完善）"
+    echo ""
+    default_category_section "Fixed" "问题修复描述（请完善）"
+    echo ""
+    default_category_section "Known Issues" "已知问题描述（请完善）"
+}
+
+# 解析 Added/Changed/Fixed/Known Issues：
+# 每一节独立回退 当前草稿 → 上一次全局 CHANGELOG → 占位模板
+# 上一次若仅为「- 无」/占位，则改回（请完善）预设，便于本次编辑
+resolve_category_sections() {
+    local preferred_file="${1:-}"
+    local titles=("Added" "Changed" "Fixed" "Known Issues")
+    local placeholders=(
+        "${CHIPSET} ${MODULE_MODEL} 新功能描述（请完善）"
+        "功能变更描述（请完善）"
+        "问题修复描述（请完善）"
+        "已知问题描述（请完善）"
+    )
+    local out_parts=()
+    local i title sec
+    local used_placeholder=false
+    local inherited_any=false
+
+    for i in "${!titles[@]}"; do
+        title="${titles[$i]}"
+        sec=""
+
+        if [[ -n "$preferred_file" && -f "$preferred_file" ]]; then
+            sec=$(extract_persistent_section "$preferred_file" "$title") || true
+        fi
+        if [[ -z "$sec" && "$HAS_PREVIOUS_CHANGELOG" == true && -f "$PREVIOUS_CHANGELOG_CACHE" ]]; then
+            sec=$(extract_persistent_section "$PREVIOUS_CHANGELOG_CACHE" "$title") || true
+            if [[ -n "$sec" ]] && ! category_section_is_empty_content "$sec"; then
+                inherited_any=true
+            fi
+        fi
+
+        if [[ -n "$sec" ]] && category_section_is_empty_content "$sec"; then
+            sec=""
+        fi
+
+        if [[ -z "$sec" ]]; then
+            sec=$(default_category_section "$title" "${placeholders[$i]}")
+            used_placeholder=true
+        fi
+        out_parts+=("$sec")
+    done
+
+    if [[ "$inherited_any" == true ]]; then
+        log_debug "已从上一次 CHANGELOG 继承 Added/Changed/Fixed/Known Issues 实质内容"
+    fi
+    if [[ "$used_placeholder" == true ]]; then
+        log_debug "部分分类无历史可继承，已写入（请完善）占位"
+    fi
+
+    local first=true
+    for sec in "${out_parts[@]}"; do
+        if [[ "$first" == true ]]; then
+            first=false
+        else
+            printf '\n'
+        fi
+        printf '%s\n' "$sec"
+    done
+}
+
+# 解析持久章节：每一节独立回退 当前草稿 → 上一次全局 CHANGELOG → 预设占位
+# 输出始终为 ### 标题（挂在 ## [版本] 之下）
+# 若继承到的内容全是「无特殊说明」/xx，则改回 xx 预设，便于本次编辑
+resolve_persistent_sections() {
+    local preferred_file="${1:-}"
+    local s1="" s2=""
+    local used_placeholder=false
+
+    if [[ -n "$preferred_file" && -f "$preferred_file" ]]; then
+        s1=$(extract_persistent_section "$preferred_file" "$PERSISTENT_SECTION_1") || true
+        s2=$(extract_persistent_section "$preferred_file" "$PERSISTENT_SECTION_2") || true
+    fi
+
+    if [[ -z "$s1" && "$HAS_PREVIOUS_CHANGELOG" == true && -f "$PREVIOUS_CHANGELOG_CACHE" ]]; then
+        s1=$(extract_persistent_section "$PREVIOUS_CHANGELOG_CACHE" "$PERSISTENT_SECTION_1") || true
+        [[ -n "$s1" ]] && log_debug "已从上一次 CHANGELOG 继承「${PERSISTENT_SECTION_1}」"
+    fi
+    if [[ -z "$s2" && "$HAS_PREVIOUS_CHANGELOG" == true && -f "$PREVIOUS_CHANGELOG_CACHE" ]]; then
+        s2=$(extract_persistent_section "$PREVIOUS_CHANGELOG_CACHE" "$PERSISTENT_SECTION_2") || true
+        [[ -n "$s2" ]] && log_debug "已从上一次 CHANGELOG 继承「${PERSISTENT_SECTION_2}」"
+    fi
+
+    # 空内容不继承「无特殊说明」三行，改回 xx 预设模板
+    if [[ -n "$s1" ]] && persistent_section_is_empty_content "$s1"; then
+        s1=""
+    fi
+    if [[ -n "$s2" ]] && persistent_section_is_empty_content "$s2"; then
+        s2=""
+    fi
+
+    if [[ -z "$s1" ]]; then
+        s1=$(format_persistent_section "$PERSISTENT_SECTION_1")
+        used_placeholder=true
+    fi
+    if [[ -z "$s2" ]]; then
+        s2=$(format_persistent_section "$PERSISTENT_SECTION_2")
+        used_placeholder=true
+    fi
+
+    if [[ "$used_placeholder" == true ]]; then
+        log_debug "持久章节无历史可继承，已写入预设（将 xx 换成实际说明）"
+    fi
+
+    # 命令替换会吃掉尾部换行，必须显式插入空行分隔两节
+    if [[ -n "$s1" && -n "$s2" ]]; then
+        printf '%s\n\n%s\n' "$s1" "$s2"
+    elif [[ -n "$s1" ]]; then
+        printf '%s\n' "$s1"
+    elif [[ -n "$s2" ]]; then
+        printf '%s\n' "$s2"
+    fi
+}
+
+# 去掉文档标题与旧版顶层 ## 持久章节；保留各版本内的 ### 持久章节
+strip_toplevel_noise() {
+    local file="$1"
+    [[ -f "$file" ]] || return 0
+    awk -v s1="$PERSISTENT_SECTION_1" -v s2="$PERSISTENT_SECTION_2" '
+        BEGIN { skip = 0 }
+        /^#[[:space:]]/ && !/^##/ { next }
+        /^##[[:space:]]/ {
+            title = $0
+            sub(/^##[[:space:]]+/, "", title)
+            sub(/[[:space:]]+$/, "", title)
+            if (title == s1 || title == s2) {
+                skip = 1
+                next
+            }
+            skip = 0
+            print
+            next
+        }
+        skip { next }
+        { print }
+    ' "$file"
+}
+
+# 判断正文是否已包含持久章节（### 或旧 ##）
+text_has_persistent_sections() {
+    local text="$1"
+    local tmp
+    tmp=$(mktemp)
+    printf '%s\n' "$text" > "$tmp"
+    extract_persistent_sections "$tmp" >/dev/null 2>&1
+    local rc=$?
+    rm -f "$tmp"
+    return $rc
+}
+
+# 在 ## [版本] 的 Build/Upload 元数据之后插入持久章节
+inject_persistent_under_version() {
+    local text="$1"
+    local persistent="$2"
+    local tmp_text tmp_persist out
+    tmp_text=$(mktemp)
+    tmp_persist=$(mktemp)
+    out=$(mktemp)
+    printf '%s\n' "$text" > "$tmp_text"
+    printf '%s\n' "$persistent" > "$tmp_persist"
+    awk -v pfile="$tmp_persist" '
+        BEGIN {
+            injected = 0
+            after_ver = 0
+        }
+        function dump_persistent(    line) {
+            while ((getline line < pfile) > 0) print line
+            close(pfile)
+        }
+        /^##[[:space:]]+\[/ {
+            print
+            after_ver = 1
+            next
+        }
+        after_ver && /^>/ {
+            print
+            next
+        }
+        after_ver && !injected {
+            print ""
+            dump_persistent()
+            injected = 1
+            after_ver = 0
+            if ($0 ~ /^[[:space:]]*$/) next
+            print
+            next
+        }
+        { print }
+        END {
+            if (!injected) {
+                print ""
+                dump_persistent()
+            }
+        }
+    ' "$tmp_text" > "$out"
+    cat "$out"
+    rm -f "$tmp_text" "$tmp_persist" "$out"
+}
+
 # 识别 CHECKED: yes（允许空白、大小写、Windows CRLF）
 changelog_is_checked() {
     local file="$1"
@@ -760,6 +1148,7 @@ generate_changelog_template() {
     local temp_file="${SDK_ROOT_DIR}/${CHANGELOG_TEMP}"
     local today_date
     today_date="$DATE_FORMATTED"
+    local persistent_block=""
 
     # 已有草稿一律保留：未勾选 CHECKED 时不得重建，否则会清掉已填写的发行内容
     if [[ -f "$temp_file" ]]; then
@@ -775,36 +1164,44 @@ generate_changelog_template() {
         if ! grep -q "\[${VERSION}\]" "$temp_file" 2>/dev/null; then
             log_warn "草稿中的版本号与当前镜像 ${VERSION} 可能不一致，请在编辑器中确认"
         fi
+        # 旧草稿若缺少持久章节，插入到 ## [版本] 元数据之后
+        if ! extract_persistent_sections "$temp_file" >/dev/null 2>&1; then
+            persistent_block=$(resolve_persistent_sections "")
+            local patched body
+            body=$(cat "$temp_file")
+            patched=$(inject_persistent_under_version "$body" "$persistent_block")
+            printf '%s\n' "$patched" > "$temp_file"
+            log_info "已为旧草稿在版本标题下补上持久章节（从上一次 CHANGELOG 继承或占位）"
+        fi
         review_existing_changelog "$temp_file"
         return 0
     fi
 
+    # 仅新建模板时才解析持久章节与分类（避免无历史时多余刷屏）
+    persistent_block=$(resolve_persistent_sections "")
+    local category_block
+    category_block=$(resolve_category_sections "")
+
     log_info "基于最近的 git 提交记录生成模板..."
 
-    # 生成模板文件
-    cat > "$temp_file" << TEMPLATE_EOF
-# Release Notes
-
+    # 持久章节 + 分类挂在 ## [版本] 之下；单独写入避免 heredoc 展开 $ 等字符
+    {
+        echo "# Release Notes"
+        echo ""
+        cat << TEMPLATE_EOF
 ## [${VERSION}] $(date '+%Y-%m-%d %H:%M')
 
 > **Build:** ${BUILD_TIME:-${DATE_FORMATTED}}
 > **Upload:** $(date '+%Y-%m-%d %H:%M')
 
-### Added
-- ${CHIPSET} ${MODULE_MODEL} 新功能描述（请完善）
-
-### Changed
-- 功能变更描述（请完善）
-
-### Fixed
-- 问题修复描述（请完善）
-
-### Known Issues
-- 已知问题描述（请完善）
-
----
-
 TEMPLATE_EOF
+        printf '%s\n' "$persistent_block"
+        echo ""
+        printf '%s\n' "$category_block"
+        echo ""
+        echo "---"
+        echo ""
+    } > "$temp_file"
 
     # 追加 Git Commit History（如果可用）
     if git log --oneline -10 &>/dev/null; then
@@ -823,7 +1220,10 @@ TEMPLATE_EOF
         echo "---"
         echo ""
         echo "> ⚠️ 请开发者人工审核以上 CHANGELOG 内容并完善，确认无误后将下方标记改为 yes"
-        echo "> 确认后、上传前将自动删除「（请完善）」；未填写任何内容的分类会自动补上一行空行和「- 无」"
+        echo "> 确认后、上传前将自动删除「（请完善）」；未填写任何内容的分类会自动补上「- 无」"
+        echo "> 「${PERSISTENT_SECTION_1}」「${PERSISTENT_SECTION_2}」中请将预设「xx」换成实际说明；全部未填时整节只保留「无特殊说明」"
+        echo "> Added/Changed/Fixed/Known Issues 已从上一次 CHANGELOG 继承（若有实质内容）；无内容时为（请完善）占位"
+        echo "> 注意事项与变更分类通常只需改有变化的部分"
         echo "${UNCHECKED_MARKER}"
         echo "> 编辑完成后保存文件，重新执行本脚本即可继续。"
     } >> "$temp_file"
@@ -833,6 +1233,7 @@ TEMPLATE_EOF
     echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${YELLOW}║  请完善发行说明内容，并将 CHECKED 标记改为 yes 后重试        ║${NC}"
     echo -e "${YELLOW}║  确认后将自动去掉「（请完善）」；空分类会补上「- 无」        ║${NC}"
+    echo -e "${YELLOW}║  产线/测试部/变更分类均可继承上一次；只改有变化的部分        ║${NC}"
     echo -e "${YELLOW}║                                                              ║${NC}"
     echo -e "${YELLOW}║  文件: ${temp_file}${NC}"
     echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════╝${NC}"
@@ -841,22 +1242,24 @@ TEMPLATE_EOF
     # 检查 FEASY_FORCE_SKIP 环境变量（CI 自动化使用）
     if [[ "${FEASY_FORCE_SKIP:-}" == "1" ]]; then
         log_info "检测到 FEASY_FORCE_SKIP=1，跳过 CHANGELOG 审核流程"
-        # 生成默认 CHANGELOG 内容（无需审核标记）
-        cat > "${SDK_ROOT_DIR}/${CHANGELOG_TEMP}" << CHG_EOF
-# Release Notes
-
+        {
+            echo "# Release Notes"
+            echo ""
+            cat << CHG_EOF
 ## [${VERSION}] $(date '+%Y-%m-%d %H:%M')
 
 > **Build:** ${BUILD_TIME:-${DATE_FORMATTED}}
 > **Upload:** $(date '+%Y-%m-%d %H:%M')
 
-### Added
-- ${CHIPSET} ${MODULE_MODEL} 驱动支持
-
----
-
-${CHECKED_MARKER}
 CHG_EOF
+            printf '%s\n' "$persistent_block"
+            echo ""
+            printf '%s\n' "$category_block"
+            echo ""
+            echo "---"
+            echo ""
+            echo "${CHECKED_MARKER}"
+        } > "${SDK_ROOT_DIR}/${CHANGELOG_TEMP}"
         log_info "自动生成默认 CHANGELOG_TEMP.md"
         return 0
     fi
@@ -876,9 +1279,12 @@ CHG_EOF
 }
 
 # ===================== CHANGELOG 占位符清理 =====================
-# CHECKED: yes 之后、上传之前：删除模板占位行；整节为空时补上「- 无」
-# 判定原则：分类下除模板原句（形如「- xxx描述（请完善）」）和纯空行外，
-# 其余一律视为开发者写的正文，包括空行、缩进、非「-」开头的段落，原样保留。
+# CHECKED: yes 之后、上传之前：
+#   - Added/Changed/Fixed/Known Issues：删除「（请完善）」占位行；整节为空时补「- 无」
+#   - 产线/测试部持久章节：
+#       · 已填写的预设行保留实际内容
+#       · 仍为「：xx」或冒号后为空的行不保留
+#       · 若三行均未填写，整节只写一行「无特殊说明」
 sanitize_changelog_placeholders() {
     local file="$1"
     local tmp
@@ -901,18 +1307,84 @@ sanitize_changelog_placeholders() {
     function is_blank(s) {
         return s ~ /^[[:space:]]*$/
     }
+    function is_persistent_heading(s) {
+        return (s ~ /^### 产线自动化测试注意事项说明[[:space:]]*$/ ||
+                s ~ /^### 测试部使用镜像注意事项说明[[:space:]]*$/ ||
+                s ~ /^## 产线自动化测试注意事项说明[[:space:]]*$/ ||
+                s ~ /^## 测试部使用镜像注意事项说明[[:space:]]*$/)
+    }
     function is_tracked_heading(s) {
         return (s ~ /^### Added[[:space:]]*$/ ||
                 s ~ /^### Changed[[:space:]]*$/ ||
                 s ~ /^### Fixed[[:space:]]*$/ ||
-                s ~ /^### Known Issues[[:space:]]*$/)
+                s ~ /^### Known Issues[[:space:]]*$/ ||
+                is_persistent_heading(s))
     }
     # 仅未经编辑的模板原句算占位符：必须带「（请完善）」后缀
     function is_placeholder_item(s) {
-        return s ~ /^[[:space:]]*-.*(新功能描述|功能变更描述|问题修复描述|已知问题描述)[[:space:]]*(（请完善）|\(请完善\))[[:space:]]*$/
+        return s ~ /^[[:space:]]*-.*(新功能描述|功能变更描述|问题修复描述|已知问题描述)[[:space:]]*(（请完善）|\(请完善\))[[:space:]]*$/ ||
+               s ~ /^[[:space:]]*-[[:space:]]*(（请完善）|\(请完善\))[[:space:]]*$/
+    }
+    # 预设条目：1. 模组上电下电说明：… / 2. WiFI测试说明：… / 3. 蓝牙测试说明：…
+    function is_preset_line(s) {
+        return s ~ /^[[:space:]]*[0-9]+\.[[:space:]]+(模组上电下电说明|WiFI测试说明|蓝牙测试说明)[：:]/
+    }
+    # 未填写：冒号后仍是 xx、无特殊说明，或冒号后为空
+    function preset_unfilled(s) {
+        return s ~ /[：:][[:space:]]*xx[[:space:]]*$/ ||
+               s ~ /[：:][[:space:]]*无特殊说明[[:space:]]*$/ ||
+               s ~ /[：:][[:space:]]*$/
+    }
+    function fill_preset_default(s) {
+        sub(/[：:].*$/, "：无特殊说明", s)
+        return s
+    }
+    function flush_persistent_section(    i, line, nfilled) {
+        print section_name
+        print ""
+        # 先统计是否有实际填写内容
+        nfilled = 0
+        for (i = 1; i <= nbody; i++) {
+            line = body[i]
+            if (is_blank(line)) continue
+            if (is_placeholder_item(line)) continue
+            if (line ~ /^[[:space:]]*无特殊说明[[:space:]]*$/) continue
+            if (is_preset_line(line)) {
+                if (!preset_unfilled(line)) nfilled++
+                continue
+            }
+            nfilled++
+        }
+        if (nfilled == 0) {
+            # 全部未填写：只显示「无特殊说明」，不展开三行「：无特殊说明」
+            print "无特殊说明"
+        } else {
+            # 有实际说明：按原顺序输出；未填预设行才写成「：无特殊说明」
+            for (i = 1; i <= nbody; i++) {
+                line = body[i]
+                if (is_blank(line)) continue
+                if (is_placeholder_item(line)) continue
+                if (line ~ /^[[:space:]]*无特殊说明[[:space:]]*$/) continue
+                if (is_preset_line(line)) {
+                    if (preset_unfilled(line)) line = fill_preset_default(line)
+                    print line
+                    continue
+                }
+                if (line ~ /（请完善）/ || line ~ /\(请完善\)/) line = strip_placeholder(line)
+                print line
+            }
+        }
+        print ""
+        section_name = ""
+        nbody = 0
+        delete body
     }
     function flush_section(    i, has, line) {
         if (section_name == "") return
+        if (is_persistent_heading(section_name)) {
+            flush_persistent_section()
+            return
+        }
         print section_name
         has = 0
         for (i = 1; i <= nbody; i++) {
@@ -954,12 +1426,25 @@ sanitize_changelog_placeholders() {
     END { flush_section() }
     ' "$file" > "$tmp"
 
+    # 审核通过后去掉 CHECKED 行与审核提示语（保留 > **Build:** / > **Upload:**）
+    local tmp2
+    tmp2=$(mktemp)
+    tr -d '\r' < "$tmp" \
+        | awk '
+            /^[[:space:]]*CHECKED:/ { next }
+            /^>[[:space:]]*\*\*/ { print; next }
+            /^>/ { next }
+            { print }
+          ' > "$tmp2"
+    mv "$tmp2" "$tmp"
+
     mv "$tmp" "$file"
-    log_info "已清理 CHANGELOG 占位符「（请完善）」；空白分类已填入「- 无」"
+    log_info "已清理 CHANGELOG 占位符与审核提示；未填写的产线/测试部说明已收为「无特殊说明」，空白分类已填入「- 无」"
 }
 
 # ===================== CHANGELOG 提取函数 =====================
-# 从 CHANGELOG_TEMP.md 中提取当前版本的条目（去掉 CHECKED 标记和提示说明）
+# 从 CHANGELOG_TEMP.md 中提取发行说明正文（去掉 CHECKED 标记和审核提示）
+# 保留元数据行 > **Build:** / > **Upload:**，删除其余 > 提示语
 extract_current_version_entry() {
     local source_file="$1"
 
@@ -968,18 +1453,76 @@ extract_current_version_entry() {
         return
     fi
 
-    # 只去掉审核标记和提示语，保留正文与 ---；勿用会吞掉全文的 trailing-blank sed
     tr -d '\r' < "$source_file" \
-        | sed -e '/^[[:space:]]*CHECKED:/d' \
-              -e '/^> ⚠️/d' \
-              -e '/^> 确认后/d' \
-              -e '/^> 编辑完成后/d' \
-              -e '/^>[[:space:]]*$/d' \
+        | awk '
+            /^[[:space:]]*CHECKED:/ { next }
+            # 保留 Build/Upload 元数据
+            /^>[[:space:]]*\*\*/ { print; next }
+            # 删除其余审核提示（> 开头的说明行）
+            /^>/ { next }
+            { print }
+          ' \
         | awk '
             NF { empty = 0; print; next }
             { if (empty == 0) print; empty = 1 }
             END { }
           '
+}
+
+# 组装最终 CHANGELOG.md：
+#   # Release Notes
+#   ## [本次版本]
+#   ### 产线自动化测试注意事项说明   ← 在版本标题之下；优先本次草稿，否则上一次
+#   ### 测试部使用镜像注意事项说明
+#   ### Added / Changed / ...
+#   ---
+#   （历史版本条目；去掉旧版顶层 ## 持久章节与重复标题）
+assemble_full_changelog() {
+    local current_entry="$1"
+    local output_file="$2"
+
+    local preferred_source=""
+    if [[ -n "$RELEASE_NOTES_PATH" && -f "$RELEASE_NOTES_PATH" ]]; then
+        preferred_source="$RELEASE_NOTES_PATH"
+    elif [[ -f "${SDK_ROOT_DIR}/${CHANGELOG_TEMP}" ]]; then
+        preferred_source="${SDK_ROOT_DIR}/${CHANGELOG_TEMP}"
+    fi
+
+    # 去掉 # Release Notes 与旧版顶层 ## 持久章节
+    local version_body
+    local tmp_cur
+    tmp_cur=$(mktemp)
+    printf '%s\n' "$current_entry" > "$tmp_cur"
+    version_body=$(strip_toplevel_noise "$tmp_cur")
+    rm -f "$tmp_cur"
+    version_body=$(printf '%s\n' "$version_body" | sed -e '/./,$!d')
+
+    # 若版本条目内尚无持久章节，再解析并插入（已有则不解析，避免占位日志）
+    if ! text_has_persistent_sections "$version_body"; then
+        local persistent_block
+        persistent_block=$(resolve_persistent_sections "$preferred_source")
+        version_body=$(inject_persistent_under_version "$version_body" "$persistent_block")
+    fi
+
+    local history=""
+    if [[ "$HAS_PREVIOUS_CHANGELOG" == true && -f "$PREVIOUS_CHANGELOG_CACHE" ]]; then
+        history=$(strip_toplevel_noise "$PREVIOUS_CHANGELOG_CACHE")
+        history=$(printf '%s\n' "$history" | sed -e '/./,$!d')
+    fi
+
+    {
+        echo "# Release Notes"
+        echo ""
+        if [[ -n "$version_body" ]]; then
+            printf '%s\n' "$version_body"
+        fi
+        if [[ -n "$history" ]]; then
+            echo ""
+            echo "---"
+            echo ""
+            printf '%s\n' "$history"
+        fi
+    } > "$output_file"
 }
 
 # ===================== 打包镜像 =====================
@@ -994,7 +1537,7 @@ package_image() {
     local zip_name="${img_basename%.img}.zip"
     ZIP_FILE="${TEMP_DIR}/${zip_name}"
 
-    # 1. 获取当前版本的发行说明（单版本条目）
+    # 1. 获取当前版本的发行说明（可能含持久章节；组装时会拆分）
     local current_entry=""
     if [[ -n "$RELEASE_NOTES_PATH" ]]; then
         log_info "使用外部 Release Notes: ${RELEASE_NOTES_PATH}"
@@ -1009,73 +1552,32 @@ package_image() {
             current_entry=$(sed -n '1,/^---/p' "${SDK_ROOT_DIR}/${CHANGELOG_TEMP}" | sed '$d')
         fi
     else
-        # 生成最小版本
-        log_warn "未找到任何 CHANGELOG 来源，生成默认版本"
+        # 生成最小版本（持久章节由 assemble_full_changelog 插入到版本标题下）
+        log_warn "未找到任何 CHANGELOG 来源，生成默认版本条目"
         current_entry=$(
-            printf '# Release Notes\n\n## [v%s] %s\n\n> **Build:** %s\n> **Upload:** %s\n\n### Added\n- %s %s 驱动支持\n\n---\n' \
+            printf '## [%s] %s\n\n> **Build:** %s\n> **Upload:** %s\n\n### Added\n- %s %s 驱动支持\n\n---\n' \
                 "$VERSION" "$(date '+%Y-%m-%d %H:%M')" \
                 "${BUILD_TIME:-$DATE_FORMATTED}" "$(date '+%Y-%m-%d %H:%M')" \
                 "$CHIPSET" "$MODULE_MODEL"
         )
     fi
 
-    # 2. 构建全局 CHANGELOG 路径（Debug/Release 层级）
-    local global_parent
-    global_parent=$(dirname "$target_path")
-    local global_changelog_path="${global_parent}/${CHANGELOG_FILE}"
-
-    # 3. 生成完整的 CHANGELOG.md（当前条目 + 已有全局历史，新版本在上方）
+    # 2. 生成完整的 CHANGELOG.md（本次版本含持久章节 + 历史版本）
     local full_changelog="${TEMP_DIR}/${CHANGELOG_FILE}"
-    local remote_changelog_tmp=""
-
-    if [[ "$FTP_USE_LFTP" == true ]]; then
-        # lftp 模式：尝试下载远程全局 CHANGELOG.md
-        # 拆分为目录+文件名，cd 到目录再 get（避免中文路径 CWD 问题）
-        # 使用 TEMP_DIR 下的固定路径名（TEMP_DIR 是全新空目录，不会冲突）
-        local changelog_dir
-        changelog_dir=$(dirname "$global_changelog_path")
-        local changelog_file
-        changelog_file=$(basename "$global_changelog_path")
-        remote_changelog_tmp="${TEMP_DIR}/remote_changelog.md"
-        rm -f "$remote_changelog_tmp"
-        # lftp 在 get 失败时仍可能返回 0，必须确认本地确实下到了非空文件，否则会把 FTP 上的历史发行说明覆盖成仅当前版本
-        if lftp_exec "cd ${changelog_dir} && get ${changelog_file} -o ${remote_changelog_tmp}" \
-            && [[ -s "$remote_changelog_tmp" ]]; then
-            log_info "发现远程已有全局 CHANGELOG.md，追加当前发行说明..."
-            {
-                echo "$current_entry"
-                echo ""
-                echo "---"
-                echo ""
-                cat "$remote_changelog_tmp"
-            } > "$full_changelog"
-        else
-            log_info "首次发行（远程无 CHANGELOG.md），创建新的发行说明..."
-            echo "$current_entry" > "$full_changelog"
-        fi
-        rm -f "$remote_changelog_tmp"
-    elif [[ -f "$global_changelog_path" ]]; then
-        # 本地挂载模式：直接读取文件
-        log_info "发现已有全局 CHANGELOG.md，追加当前发行说明..."
-        {
-            echo "$current_entry"
-            echo ""
-            echo "---"
-            echo ""
-            cat "$global_changelog_path"
-        } > "$full_changelog"
+    if [[ "$HAS_PREVIOUS_CHANGELOG" == true ]]; then
+        log_info "合并 CHANGELOG：版本内继承持久章节 + 追加本次版本到历史上方"
     else
-        log_info "首次发行，创建新的 CHANGELOG.md..."
-        echo "$current_entry" > "$full_changelog"
+        log_info "首次发行，创建带持久章节的 CHANGELOG.md"
     fi
+    assemble_full_changelog "$current_entry" "$full_changelog"
 
-    # 4. 复制镜像到临时目录
+    # 3. 复制镜像到临时目录
     cp "$IMG_NAME" "${TEMP_DIR}/"
 
-    # 5. 打包 zip
+    # 4. 打包 zip
     log_info "创建压缩包: ${zip_name}"
     log_info "  包含: ${img_basename}"
-    log_info "  包含: ${CHANGELOG_FILE}（含完整历史）"
+    log_info "  包含: ${CHANGELOG_FILE}（版本内持久章节 + 完整历史）"
 
     if [[ "$DRY_RUN" == true ]]; then
         log_info "[模拟] zip -r ${ZIP_FILE} ${img_basename} ${CHANGELOG_FILE}"
@@ -1357,6 +1859,12 @@ cleanup() {
         fi
     fi
 
+    # 清理上一次 CHANGELOG 缓存
+    if [[ -f "${PREVIOUS_CHANGELOG_CACHE:-}" ]]; then
+        rm -f "$PREVIOUS_CHANGELOG_CACHE"
+        log_debug "已清理上一次 CHANGELOG 缓存"
+    fi
+
     # 清理临时目录
     if [[ -n "${TEMP_DIR:-}" && -d "$TEMP_DIR" ]]; then
         rm -rf "$TEMP_DIR"
@@ -1381,7 +1889,7 @@ main() {
 
     echo ""
     echo -e "${CYAN}╔══════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║     Feasycom 模组测试镜像上传工具 v1.3   ║${NC}"
+    echo -e "${CYAN}║     Feasycom 模组测试镜像上传工具 v2.3   ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════╝${NC}"
     echo ""
 
@@ -1428,39 +1936,42 @@ main() {
     # 7. 镜像版本冲突检查（仅 Release）
     check_version_conflict "$target_path"
 
-    # 8. 检测 FEASY_FORCE_SKIP 环境变量（CI 自动化逃生通道）
+    # 8. 拉取上一次全局 CHANGELOG（供持久章节继承；模板生成与打包共用）
+    fetch_previous_changelog "$target_path"
+
+    # 9. 检测 FEASY_FORCE_SKIP 环境变量（CI 自动化逃生通道）
     if [[ "${FEASY_FORCE_SKIP:-}" == "1" && "$SKIP_CHANGELOG" == false && -z "$RELEASE_NOTES_PATH" ]]; then
         log_info "检测到环境变量 FEASY_FORCE_SKIP=1，自动进入 --skip-changelog 模式"
         SKIP_CHANGELOG=true
     fi
 
-    # 9. 生成/检查 CHANGELOG 模板
+    # 10. 生成/检查 CHANGELOG 模板
     if [[ "$SKIP_CHANGELOG" == true ]]; then
         log_info "已跳过 CHANGELOG 审核流程 (--skip-changelog)"
-        log_info "将为 .zip 包生成默认 CHANGELOG.md"
+        log_info "将为 .zip 包生成默认 CHANGELOG.md（仍继承持久章节）"
     elif [[ -n "$RELEASE_NOTES_PATH" ]]; then
         log_info "使用外部 Release Notes 文件: ${RELEASE_NOTES_PATH}"
     else
         generate_changelog_template
     fi
 
-    # 10. 目标路径确认
+    # 11. 目标路径确认
     confirm_target_path "$target_path"
 
-    # 11. 打包镜像 (.img + CHANGELOG.md → .zip，CHANGELOG 与全局历史合并)
+    # 12. 打包镜像 (.img + CHANGELOG.md → .zip，CHANGELOG 与全局历史合并)
     if ! package_image "$target_path"; then
         log_error "打包失败"
         exit 1
     fi
 
-    # 12. 检查目标文件是否已存在
+    # 13. 检查目标文件是否已存在
     local zip_basename
     zip_basename=$(basename "$ZIP_FILE")
     if ! check_file_exists "$target_path" "$zip_basename"; then
         exit 1
     fi
 
-    # 13. 创建目标目录（目录已存在则跳过）
+    # 14. 创建目标目录（目录已存在则跳过）
     if [[ "$DRY_RUN" == true ]]; then
         if [[ "$FTP_USE_LFTP" == true ]]; then
             log_info "[模拟] lftp mkdir -p ${target_path}"
@@ -1489,22 +2000,22 @@ main() {
         fi
     fi
 
-    # 14. 上传 .zip
+    # 15. 上传 .zip
     if ! upload_file "$target_path"; then
         log_error "文件上传失败"
         exit 1
     fi
 
-    # 15. 更新全局 CHANGELOG.md（FTP 目录）
+    # 16. 更新全局 CHANGELOG.md（FTP 目录）
     update_global_changelog "$target_path"
 
-    # 16. 生成上传报告
+    # 17. 生成上传报告
     generate_upload_report "$target_path"
 
-    # 17. 上传 build_info 相关文件（build_info.txt / build_info.diff）
+    # 18. 上传 build_info 相关文件（build_info.txt / build_info.diff）
     upload_build_info "$target_path"
 
-    # 18. 计算耗时并输出摘要
+    # 19. 计算耗时并输出摘要
     local end_time
     end_time=$(date +%s)
     local duration=$((end_time - start_time))
