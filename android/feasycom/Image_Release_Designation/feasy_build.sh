@@ -122,7 +122,7 @@ usage() {
     以上四个字段必须符合以下规范（脚本会自动校验）:
         1. PRODUCT_CUSTOM_CHIP      — 英文和数字组成，必须英文起始，不区分大小写，e.g. RK3568, RK3588, MTK8391
         2. PRODUCT_SYSTEM_PLATFORM  — 英文和数字组成，必须英文起始，不区分大小写，e.g. A11, U2204, D12, Yocto
-        3. PRODUCT_CHIPSET_NAME     — 英文和数字或至多一个下划线，必须英文起始，不区分大小写，e.g. ATBM6165, RTL8821CS, MT7921
+        3. PRODUCT_CHIPSET_NAME     — 英文和数字组成，必须英文起始，禁止下划线，不区分大小写，e.g. ATBM6165, RTL8821CS, MT7921
         4. PRODUCT_CUSTOM_VERSION   — 形如 "Vx.x.x"，x 为数字（允许多位十进制），不区分大小写，e.g. V1.0.0, V1.10.0
 
     设备配置文件路径规则: device/rockchip/rk356x/<模组型号>/<模组型号>.mk
@@ -362,10 +362,10 @@ validate_mk_meta() {
         log_info "PRODUCT_SYSTEM_PLATFORM: ${PRODUCT_SYSTEM_PLATFORM} ✓"
     fi
 
-    # 3. PRODUCT_CHIPSET_NAME: 英文和数字或至多一个下划线，必须英文起始，不区分大小写
-    if [[ ! "$PRODUCT_CHIPSET_NAME" =~ ^[A-Za-z][A-Za-z0-9]*(_[A-Za-z0-9]+)?$ ]]; then
+    # 3. PRODUCT_CHIPSET_NAME: 英文和数字组成，必须英文起始，禁止下划线，不区分大小写
+    if [[ ! "$PRODUCT_CHIPSET_NAME" =~ ^[A-Za-z][A-Za-z0-9]*$ ]]; then
         log_error "PRODUCT_CHIPSET_NAME 格式错误: '${PRODUCT_CHIPSET_NAME}'"
-        log_error "  规范要求: 只能由英文和数字或至多一个下划线组成，必须英文起始，不区分大小写"
+        log_error "  规范要求: 只能由英文和数字组成，必须英文起始，禁止包含下划线 (_)，不区分大小写"
         log_error "  正确示例: ATBM6165, RTL8821CS, MT7921"
         has_error=true
     else
@@ -1287,7 +1287,7 @@ main() {
     
     echo ""
     echo -e "${CYAN}╔═══════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║      Feasycom 模组测试镜像编译工具 v1.3.2     ║${NC}"
+    echo -e "${CYAN}║      Feasycom 模组测试镜像编译工具 v1.3.3     ║${NC}"
     echo -e "${CYAN}╚═══════════════════════════════════════════════╝${NC}"
     echo ""
     
