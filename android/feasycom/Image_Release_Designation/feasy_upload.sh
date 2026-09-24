@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# feasy_upload.sh - 模组测试镜像自动化上传脚本 (v2.3)
+# feasy_upload.sh - 模组测试镜像自动化上传脚本 (v2.3.1)
 # 功能：自动解析镜像名、生成 Release Notes、打包 .zip、上传、追加 CHANGELOG
 # 安全机制：禁止覆盖已有文件、限制操作路径、镜像名合法性检查、CHANGELOG 审核门禁
 # FTP：自动检测本地挂载或 lftp 连接 ${FTP_HOST:-192.168.0.71}:${FTP_PORT:-20249}
@@ -808,15 +808,17 @@ extract_persistent_sections() {
 
 # 持久章节预设条目（开发者将 xx 换成实际说明；未改则审核后变为「无特殊说明」）
 PERSISTENT_PRESET_LINE_1="1. 模组上电下电说明：xx"
-PERSISTENT_PRESET_LINE_2="2. WiFI测试说明：xx"
-PERSISTENT_PRESET_LINE_3="3. 蓝牙测试说明：xx"
+PERSISTENT_PRESET_LINE_2="2. 驱动加载说明：xx"
+PERSISTENT_PRESET_LINE_3="3. WiFI测试说明：xx"
+PERSISTENT_PRESET_LINE_4="4. 蓝牙测试说明：xx"
 
 # 单个持久章节的预设正文（不含标题）
 persistent_section_preset_body() {
     printf '%s\n' \
         "$PERSISTENT_PRESET_LINE_1" \
         "$PERSISTENT_PRESET_LINE_2" \
-        "$PERSISTENT_PRESET_LINE_3"
+        "$PERSISTENT_PRESET_LINE_3" \
+        "$PERSISTENT_PRESET_LINE_4"
 }
 
 # 带标题的完整持久章节块
@@ -843,9 +845,9 @@ persistent_section_is_empty_content() {
     if awk '
         /^### / || /^## / { next }
         /^[[:space:]]*$/ { next }
-        /^[[:space:]]*[0-9]+\.[[:space:]]+(模组上电下电说明|WiFI测试说明|蓝牙测试说明)[：:][[:space:]]*xx[[:space:]]*$/ { next }
-        /^[[:space:]]*[0-9]+\.[[:space:]]+(模组上电下电说明|WiFI测试说明|蓝牙测试说明)[：:][[:space:]]*无特殊说明[[:space:]]*$/ { next }
-        /^[[:space:]]*[0-9]+\.[[:space:]]+(模组上电下电说明|WiFI测试说明|蓝牙测试说明)[：:][[:space:]]*$/ { next }
+        /^[[:space:]]*[0-9]+\.[[:space:]]+(模组上电下电说明|驱动加载说明|WiFI测试说明|蓝牙测试说明)[：:][[:space:]]*xx[[:space:]]*$/ { next }
+        /^[[:space:]]*[0-9]+\.[[:space:]]+(模组上电下电说明|驱动加载说明|WiFI测试说明|蓝牙测试说明)[：:][[:space:]]*无特殊说明[[:space:]]*$/ { next }
+        /^[[:space:]]*[0-9]+\.[[:space:]]+(模组上电下电说明|驱动加载说明|WiFI测试说明|蓝牙测试说明)[：:][[:space:]]*$/ { next }
         /^[[:space:]]*无特殊说明[[:space:]]*$/ { next }
         /^[[:space:]]*-[[:space:]]*(（请完善）|\(请完善\))[[:space:]]*$/ { next }
         { found = 1; exit }
@@ -1325,9 +1327,9 @@ sanitize_changelog_placeholders() {
         return s ~ /^[[:space:]]*-.*(新功能描述|功能变更描述|问题修复描述|已知问题描述)[[:space:]]*(（请完善）|\(请完善\))[[:space:]]*$/ ||
                s ~ /^[[:space:]]*-[[:space:]]*(（请完善）|\(请完善\))[[:space:]]*$/
     }
-    # 预设条目：1. 模组上电下电说明：… / 2. WiFI测试说明：… / 3. 蓝牙测试说明：…
+    # 预设条目：1. 模组上电下电说明 / 2. 驱动加载说明 / 3. WiFI测试说明 / 4. 蓝牙测试说明
     function is_preset_line(s) {
-        return s ~ /^[[:space:]]*[0-9]+\.[[:space:]]+(模组上电下电说明|WiFI测试说明|蓝牙测试说明)[：:]/
+        return s ~ /^[[:space:]]*[0-9]+\.[[:space:]]+(模组上电下电说明|驱动加载说明|WiFI测试说明|蓝牙测试说明)[：:]/
     }
     # 未填写：冒号后仍是 xx、无特殊说明，或冒号后为空
     function preset_unfilled(s) {
